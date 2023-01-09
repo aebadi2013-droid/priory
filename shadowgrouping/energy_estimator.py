@@ -55,8 +55,8 @@ class StateSampler():
         return pauli_string
 
 class Energy_estimator():
-    """ Convenience class that holds both a measurement scheme and a VQA instance.
-        The main workflow consists of proposing the next (few) measurement settings and measuring them in the VQA.
+    """ Convenience class that holds both a measurement scheme and a StateSampler instance.
+        The main workflow consists of proposing the next (few) measurement settings and measuring them given the state in StateSampler.
         Furthermore, it tracks all measurement settings and their respective outcomes (of value +/-1 per qubit).
         Based on these values, the current energy estimate can be calculated.
         
@@ -101,7 +101,7 @@ class Energy_estimator():
     
     def measure(self):
         """ If there are proposed settings in self.settings that have not been measured, do so.
-            The internal state of the VQE does not alter by doing so.
+            The internal state of the StateSampler does not alter by doing so.
         """
         num_meas = self.num_settings - self.num_outcomes
         if num_meas > 0:
