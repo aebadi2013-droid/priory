@@ -389,6 +389,8 @@ class SettingSampler(Measurement_scheme):
             # by counting over the index vector, instead
             is_hit = np.array([hit_by(o,self.settings[ind]) for o in self.obs],dtype=int)
             self.N_hits += is_hit*repeats
+        if N_samples==1:
+            Q = Q.flatten()
         return Q, {"N_samples": N_samples}
     
 class Derandomization(Shadow_Grouping):
