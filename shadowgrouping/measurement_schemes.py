@@ -112,7 +112,7 @@ class Measurement_scheme:
     def get_epsilon_statistical(self,delta):
         """ Return the epsilon such that the corresponding Energy estimation inconfidence bound is not larger than delta.
             If at least one of the N_hits is 0, epsilon is set equal to infinity.
-            Else, epsilon = |weights/sqrt(N_hits)| * N_delta, see equation 6 in manuscript
+            Else, epsilon = |weights/sqrt(N_hits)| * sqrt(N_delta), see equation 6 in manuscript
         """
         if np.min(self.N_hits) == 0:
             return np.infty
