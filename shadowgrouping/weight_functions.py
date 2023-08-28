@@ -1,6 +1,6 @@
 import numpy as np
 
-class Derandomization_weight():
+class Inconfidence_bound():
     
     def __init__(self,focus_on_greedy=True):
         self.greedy = focus_on_greedy
@@ -17,17 +17,11 @@ class Derandomization_weight():
     def __call__(self):
         return self.get_weights
     
-class Energy_estimation_inconfidence_weight():
+class Bernstein_bound():
     def __init__(self,alpha=1):
         self.alpha = alpha
         assert alpha >= 1, "alpha has to be chosen larger or equal 1, but was {}.".format(alpha)
         return
-    
-    def get_weights_for_testing(self,w,eps,N_hits):
-        inconf = self.alpha * w**2
-        condition = N_hits != 0
-        inconf[condition] /= self.alpha*(N_hits[condition]+1)*N_hits[condition]
-        return inconf
     
     def get_weights(self,w,eps,N_hits):
         inconf = self.alpha * np.abs(w)
