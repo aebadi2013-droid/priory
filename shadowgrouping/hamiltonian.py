@@ -1,7 +1,8 @@
+from qiskit_nature.drivers import Molecule
 from qiskit_nature.drivers.second_quantization import ElectronicStructureDriverType, ElectronicStructureMoleculeDriver
 from qiskit_nature.problems.second_quantization import ElectronicStructureProblem
 from qiskit_nature.converters.second_quantization import QubitConverter
-from qiskit_nature.mappers.second_quantization import JordanWignerMapper, ParityMapper, BravyiKitaevMapper #BravyiKitaevSuperFastMapper
+from qiskit_nature.second_q.mappers import JordanWignerMapper, BravyiKitaevMapper, ParityMapper #BravyiKitaevSuperFastMapper
 from qiskit.algorithms import NumPyMinimumEigensolver
 from qiskit_nature.algorithms import GroundStateEigensolver
 from qiskit.quantum_info import Pauli
@@ -192,11 +193,11 @@ def get_pauli_list(molecule,
     # 2nd quantisation
     second_q_op = es_problem.second_q_ops()
     if verbose:
-        print(second_q_op[0])
+        print(second_q_op["ElectronicEnergy"])
         print()
     # fermion-to-qubit mapping
     qubit_converter = QubitConverter(mapping())
-    qubit_op = qubit_converter.convert(second_q_op[0])
+    qubit_op = qubit_converter.convert(second_q_op["ElectronicEnergy"])
     if verbose:
         print("Qubit Operator")
         print(qubit_op)
