@@ -3,6 +3,8 @@ from shadowgrouping.molecules import CHEMICAL_ACCURACY, available_molecules
 from shadowgrouping.hamiltonian import mappings
 import numpy as np
 import matplotlib.pyplot as plt
+from os import mkdir
+from os.path import isdir
 
 folder_ressource_estims = "data/fig5/"
 file_name_base = "molecule_{}_mapping_{}_basis_{}.txt"
@@ -21,6 +23,9 @@ def get_Ham_details(fname):
 # This norm is independent of the fermion-to-qubit mapping, but the number of terms may vary. Hence, we minimize over this number.
 # We also keep track of the largest qubit number for convenience
 if __name__ == "__main__":
+    # create temporary folder for storing outputs
+    if not isdir("generated_figures"):
+        mkdir("generated_figures")
     num_max = 0
     norm_dict = {"sto3g":{},"6-31g":{}}
     for basis in norm_dict.keys():

@@ -2,6 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.special import erf
 from shadowgrouping.measurement_schemes import N_delta
+from os import mkdir
+from os.path import isdir
 
 #######################################################
 ##### params #####
@@ -21,6 +23,9 @@ color_dotted = "#BCC8B4"
 #######################################################
 
 if __name__ == "__main__":
+    # create temporary folder for storing outputs
+    if not isdir("generated_figures"):
+        mkdir("generated_figures")
     plt.figure(figsize=(6,3),dpi=400)
     plt.loglog(delta,numerator,color=color_line)
     #plt.text(6e-4,2e3,"$N_\delta$",color="blue",fontsize="x-large")
