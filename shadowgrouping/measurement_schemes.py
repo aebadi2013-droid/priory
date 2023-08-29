@@ -25,6 +25,43 @@ N_delta = lambda delta: 4*(2*np.sqrt(-np.log(delta))+1)**2
 ### Measurement schemes used for benchmark ###############################################
 ##########################################################################################
 
+class L1_sampler:
+    """ Comparison class that does not reconstruct the Hamiltonian expectation value by its components, but by its relative signs. """
+    
+    def __init__(self,observables,weights,epsilon):
+        assert len(observables.shape) == 2, "Observables has to be a 2-dim array."
+        M,n = observables.shape
+        weights = weights.flatten()
+        assert len(weights) == M, "Number of weights not matching number of provided observables."
+        assert epsilon > 0, "Epsilon has to be strictly positive"
+        abs_vals = np.abs(weights)
+        
+        self.obs         = observables
+        self.num_obs     = M
+        self.num_qubits  = n
+        self.w           = weights
+        self.prob        = abs_vals / np.sum(abs_vals)
+        self.eps         = epsilon
+        self.shots       = 0
+        self.is_sampling = True
+        self.is_adaptive = False
+        
+        return
+    
+    def reset(self):
+        self.shots = 0
+    
+    def find_setting(self,num_samples=1):
+        self.shots += num_samples
+        inds = np.random.choice(self.num_obs,size=(num_samples,),p=self.prob)
+        return inds
+        
+    def get_Hoeffding_bound(self):
+        return 2*np.exp(-0.5*self.eps**2*self.shots/np.sum(np.abs(self.w))**2)
+    
+    def get_epsilon(self,delta):
+        return np.sqrt(2/self.shots*np.log(2/delta)) * np.sum(np.abs(self.w))
+
 class Measurement_scheme:
     """ Parent class for measurement schemes. Requires
         observables: Array of shape (num_obs x num_qubits) with entries in {0,1,2,3} (the Pauli operators)
