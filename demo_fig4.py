@@ -6,8 +6,9 @@ from shadowgrouping.hamiltonian import mappings
 from shadowgrouping.molecules import available_molecules
 from os import mkdir
 from os.path import isdir
+import argparse
 
-########### plot params ############################################
+######### Folder default for data storage. Can be overriden by optional argument to script #########
 folder = "data/fig4/"
 print_only = ["Shadow","Adaptive","Overlapped","Single"]
 N_extended = [70,98]
@@ -15,6 +16,12 @@ delta = 0.02
 ####################################################################
 ########### style params etc #######################################
 ####################################################################
+parser = argparse.ArgumentParser(description="Recreate the plots from a given data folder. Defaults to showing the data from the manuscript plots but can be altered to use custom data. To do so, use the -f <folder_location> option.")
+parser.add_argument("-f","--folder", type=str,
+                    help="Provide the folder where the data resides. Default: {}".format(folder),
+                    default=folder
+                   )
+
 threshold = int(np.ceil(N_delta(delta)))
 plt.style.use('tableau-colorblind10')
 cycler = plt.rcParams["axes.prop_cycle"]
@@ -51,6 +58,8 @@ def insert_value_to_ticks(arr,val,threshold=0.1):
 ####################################################################
 
 if __name__ == "__main__":
+    args = parser.parse_args()
+    folder = args.folder
     # create temporary folder for storing outputs
     if not isdir("generated_figures"):
         mkdir("generated_figures")

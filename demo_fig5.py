@@ -5,12 +5,19 @@ import numpy as np
 import matplotlib.pyplot as plt
 from os import mkdir
 from os.path import isdir
+import argparse
 
-folder_ressource_estims = "data/fig5/"
+######### Folder default for data storage. Can be overriden by optional argument to script #########
+folder = "data/fig5/"
 file_name_base = "molecule_{}_mapping_{}_basis_{}.txt"
-OGM_folder = "../OverlappedGrouping/CutSet/"
 name = "OGM_{}_{}{}.txt"
 delta = 0.02
+####################################################################################################
+parser = argparse.ArgumentParser(description="Recreate the plots from a given data folder. Defaults to showing the data from the manuscript plots but can be altered to use custom data. To do so, use the -f <folder_location> option.")
+parser.add_argument("-f","--folder", type=str,
+                    help="Provide the folder where the data resides. Default: {}".format(folder),
+                    default=folder
+                   )
 
 def get_Ham_details(fname):
     with open(fname,"r") as f:
@@ -23,6 +30,8 @@ def get_Ham_details(fname):
 # This norm is independent of the fermion-to-qubit mapping, but the number of terms may vary. Hence, we minimize over this number.
 # We also keep track of the largest qubit number for convenience
 if __name__ == "__main__":
+    args = parser.parse_args()
+    folder = args.folder
     # create temporary folder for storing outputs
     if not isdir("generated_figures"):
         mkdir("generated_figures")
@@ -34,7 +43,7 @@ if __name__ == "__main__":
                 continue
             M_min = int(1e12)
             for map_name in mappings.keys():
-                temp_file_name = folder_ressource_estims+file_name_base.format(molecule_name,map_name,basis)
+                temp_file_name = folder+file_name_base.format(molecule_name,map_name,basis)
                 try:
                     num_qubits, M, norm = get_Ham_details(temp_file_name)
                 except Exception as e:
@@ -53,7 +62,7 @@ if __name__ == "__main__":
             for molecule,(n,_,_) in dict_mol.items():
                 num_cliques = np.infty
                 for map_name in mappings.keys():
-                    method = SettingSampler(np.random.rand(10,n),np.random.rand(10),OGM_folder+name.format(molecule,n,map_name.lower()))
+                    method = SettingSampler(np.random.rand(10,n),np.random.rand(10),folder+name.format(molecule,n,map_name.lower()))
                     num_cliques = min(len(method.p),num_cliques)
                 cliques[molecule] = num_cliques
         bottom = False

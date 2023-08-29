@@ -3,9 +3,17 @@ from shadowgrouping.benchmark import load_dict
 from shadowgrouping.molecules import available_molecules, available_molecules_latex, available_molecules_E_GS
 from shadowgrouping.hamiltonian import mappings
 from demo_tab1 import TexTable
+import argparse
 
+######### Folder default for data storage. Can be overriden by optional argument to script #########
 folder = "data/tab1/"
 folder_single_shot = "data/tab3/"
+####################################################################################################
+parser = argparse.ArgumentParser(description="Recreate the plots from a given data folder. Defaults to showing the data from the manuscript plots but can be altered to use custom data. To do so, use the -f <folder_location> option. In this case, all data has to lie in the same folder")
+parser.add_argument("-f","--folder", type=str,
+                    help="Provide the folder where the data resides. Default: {}".format(folder),
+                    default=folder
+                   )
 
 def read_energy_estimations(filedir,molecule_name,mapping_name,method_name,num_reps=None,use_one_norm=False):
     """ Reads in all files in >>filedir<< of the form {molecule_name}_molecule_{mapping_name}_{method_name}_energy_estimations.txt
@@ -37,6 +45,10 @@ def read_energy_estimations(filedir,molecule_name,mapping_name,method_name,num_r
 
 
 if __name__=="__main__":
+    args = parser.parse_args()
+    if args.folder != folder:
+        folder = args.folder
+        folder_single_shot = folder
     rmse_dict_methods = {}
     std_dict_methods  = {}
     for ind,molecule_name in enumerate(available_molecules):
