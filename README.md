@@ -47,7 +47,7 @@ pip3 install -r requirements.txt
 # Using the package:
 - To run demo notebooks:
   - `jupyter notebook`
-  - Then copy the url it generates, it looks something like this: `http://(0de284ecf0cd or 127.0.0.1):8888/?token=e5a2541812d85e20026b1d04983dc8380055f2d16c28a6ad`
+  - Then copy the url it generates, it looks something like this: `http://localhost:8889/?token=dde30ccc772afed3012e7c3be67a537cc1ea9036c22357c8`
   - Open it in your browser
   - Then open `tutorial.ipynb` which includes the minimal working example
 
