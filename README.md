@@ -34,7 +34,13 @@ This package is supported for *Linux*, but other platforms should work as well. 
 
 # Installation Guide:
 
-- Install `python3.9.18` from https://www.python.org/downloads/release/python-3918/ (Last checked: 29-8-23)
+- Install `python3.9.18` from https://www.python.org/downloads/release/python-3918/ (Last checked: 29-8-23). Depending on your system, this may take a few more minutes. You may use, e.g.,
+```
+sudo apt update
+sudo apt install python3.9
+sudo apt-get install python3.9-dev python3.9-venv
+```
+- Pull the package and data from this repository
 ```
 git clone https://gitlab.com/GreschAI/shadowgrouping
 cd shadowgrouping
@@ -43,13 +49,14 @@ source .shadowgrouping_env/bin/activate
 python3 -m pip install --upgrade pip
 pip3 install -r requirements.txt
 ```
+Again, this installation process depends on your system and internet speed, but should be done after a few minutes.
 
 # Using the package:
 - To run demo notebooks:
   - `jupyter notebook`
   - Then copy the url it generates, it looks something like this: `http://localhost:8889/?token=dde30ccc772afed3012e7c3be67a537cc1ea9036c22357c8`
   - Open it in your browser
-  - Then open `tutorial.ipynb` which includes the minimal working example
+  - Then open `tutorial.ipynb` which includes the minimal working example. Running all executable code in the notebooks sequentially should not take more than a few minutes on a standard laptop. If other molecules are selected, however, this run time can easily turn into a few hours though.
 
 # License
 
