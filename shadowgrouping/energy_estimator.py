@@ -93,7 +93,7 @@ class Sign_estimator():
     def propose_next_settings(self,num_steps=1):
         """ Find the <num_steps> next setting(s) via the provided measurement scheme. """
         inds = self.measurement_scheme.find_setting(num_steps)
-        self.setting_inds = np.append((self.setting_inds,inds)) if len(self.setting_inds)>0 else inds
+        self.setting_inds = np.append(self.setting_inds,inds) if len(self.setting_inds)>0 else inds
         self.num_settings += num_steps
         return
     
