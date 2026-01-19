@@ -78,7 +78,7 @@ class Hamiltonian():
         ground_state = evectors[:,index]
         return ground_energy, ground_state
 
-def load_pauli_list(folder_hamiltonian,molecule_name,basis_name,encoding,verbose=False,sparse=False,diagonalize=True):
+def load_pauli_list(folder_hamiltonian,molecule_name,basis_name,encoding,verbose=False,sparse=True,diagonalize=True):
     """ Loads the Pauli operators and the corresponding ground-state energy from the files of
         https://github.com/charleshadfield/adaptiveshadows
         Requires the name of the folder where all the Hamiltonians are stored together with the selection of the

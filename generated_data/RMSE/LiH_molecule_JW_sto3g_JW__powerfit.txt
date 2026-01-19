@@ -1,0 +1,4 @@
+run_root	method	A	c	n_points_fit	Nmin_fit
+LiH_molecule_JW_sto3g_JW_	Priori	1.39112849e+00	0.54066623	7	1000
+LiH_molecule_JW_sto3g_JW_	Posteriori	1.42234537e+00	0.54363229	7	1000
+LiH_molecule_JW_sto3g_JW_	Shadow_Grouping	1.03955316e+00	0.49945891	7	1000

@@ -1,0 +1,2 @@
+run_label	method	rmse	rmse_std	t_end_epoch	t_end_iso	num_steps
+H2O_molecule_JW_sto3g_Posteriori_Nshots=1000	Posteriori	0.11365669331742015	0.13377570243344367	1761056265.5919204	2025-10-21T16:17:45	1000

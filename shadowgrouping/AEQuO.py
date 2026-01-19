@@ -1,5 +1,7 @@
 import numpy as np
 import itertools
+#import networkx as nx
+#import matplotlib.pyplot as plt
 from shadowgrouping.hamiltonian import int_to_char
 from shadowgrouping.measurement_schemes import Shadow_Grouping
 
@@ -13,7 +15,7 @@ class AEQuO(Shadow_Grouping):
         Algorithm parameters:
         adaptiveness_L (int, >=0): degree of adaptiveness to measurement outcomes. A value of 0 means no adaptivity, larger values increase it.
         interval_isometry_l (float, >=0): A value of 0 signifies equidistant updates, larger values skew this towards more updates early on.
-        budget (int, >=0): Predefined measurement budget. A value of zero means non-adaptive allocation and overwrites the other parameters.
+        budget (int, >=0): Predefined me[;asurement budget. A value of zero means non-adaptive allocation and overwrites the other parameters.
     """
     
     def __init__(self,observables,weights,offset,adaptiveness_L=0,interval_skewness_l=0,budget=0):
@@ -37,6 +39,7 @@ class AEQuO(Shadow_Grouping):
         self.outcome_dict = np.array([[{(1,1):0,(1,-1):0,(-1,1):0,(-1,-1):0} for a1 in range(self.num_obs+1)] for a0 in range(self.num_obs+1)])
         # partition the commutativity graph using largest-degree first algorithm
         self.cliques = LDF(qubitwise_commutation_graph(self.paulis))
+        #print("cliquea by LDF", self.cliques)
         # initialize variance estimates - these are stored as self.V internally
         self.sampled_cliques = []
         self.sampled_cliques_since_update = []
@@ -85,10 +88,23 @@ class AEQuO(Shadow_Grouping):
             self.outcomes_since_update = []
         
         clique = self.setting_function()
+        #print(f"Type of clique: {type(clique)}")  # Should print <class 'list'>
+        #print(f"Length of clique: {len(clique)}")  # Number of sublists (cliques)
+        #print(f"First few elements: {clique[:15]}")  # Print first 3 cliques for inspection
+        #print("clique before CTPO function",clique) 
+
+        #print("outcome setting of AEQuO in main form",clique)
         # transform into Pauli string for compatibility with parent class
         setting, clique = self._clique_to_Pauli_observable(clique)
+        #print("clique after CTPO function",clique)
+        #print("Shape of the clique in AEQuO:", clique.shape)
         # update class counters
         self.N_hits[clique] += 1
+        #print("N_hits for AQEuO",self.N_hits)
+        #print("outcome setting of AEQuO",setting)
+
+        # Print the shape of setting
+        #print("Shape of the setting in AEQuO:", setting.shape)
         return setting, {}
         
     def overlapping_bayes_min_var(self):
@@ -162,7 +178,7 @@ class AEQuO(Shadow_Grouping):
             Returns a valid measurement setting as required for the parent class and the altered clique for further internal usage.
         """
         # the commutativity graph includes the identity term - we can simply drop it
-        clique = np.array(clique[1:]) - 1 if clique[0] == 0 else np.array(clique) - 1
+        clique = np.array(clique[1:]) - 1 if clique[0] == 0 else np.array(clique) - 1 
         clique_members = self.obs[clique]
         setting = np.max(clique_members, axis=0)
         filtered = setting != 0

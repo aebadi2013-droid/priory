@@ -1,0 +1,4 @@
+run_root	method	A	c	n_points_fit	Nmin_fit
+BeH2_molecule_JW_sto3g_JW_	Priori	1.38484624e+00	0.45711009	7	1000
+BeH2_molecule_JW_sto3g_JW_	Shadow_Grouping	3.29813893e+00	0.56437740	7	1000
+BeH2_molecule_JW_sto3g_JW_	Posteriori	2.09351095e+00	0.50608030	6	1000

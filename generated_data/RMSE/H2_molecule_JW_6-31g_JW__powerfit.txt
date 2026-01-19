@@ -1,0 +1,4 @@
+run_root	method	A	c	n_points_fit	Nmin_fit
+H2_molecule_JW_6-31g_JW_	Priori	1.54008293e+00	0.50580747	7	1000
+H2_molecule_JW_6-31g_JW_	Posteriori	1.64262121e+00	0.51115594	7	1000
+H2_molecule_JW_6-31g_JW_	Shadow_Grouping	7.31329943e-01	0.42583803	6	1000

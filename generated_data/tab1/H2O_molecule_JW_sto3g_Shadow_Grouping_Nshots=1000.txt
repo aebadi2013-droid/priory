@@ -1,0 +1,3 @@
+run_label	method	rmse	rmse_std	t_end_epoch	t_end_iso	num_steps
+H2O_molecule_JW_sto3g_Shadow_Grouping_Nshots=1000	Shadow_Grouping	0.08328216238102598	0.06560898862163411	1759755602.1233854	2025-10-06T15:00:02	1000
+H2O_molecule_JW_sto3g_Shadow_Grouping_Nshots=1000	Shadow_Grouping	0.11648869164975793	0.13132632768436558	1761049603.0792947	2025-10-21T14:26:43	1000

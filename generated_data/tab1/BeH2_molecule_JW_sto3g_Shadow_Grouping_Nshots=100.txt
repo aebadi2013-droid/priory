@@ -1,0 +1,5 @@
+run_label	method	rmse	rmse_std	t_end_epoch	t_end_iso	num_steps
+BeH2_molecule_JW_sto3g_Shadow_Grouping_Nshots=100	Shadow_Grouping	0.2607201465353314	0.3094541664967901	1761139149.4381516	2025-10-22T15:19:09	100
+BeH2_molecule_JW_sto3g_Shadow_Grouping_Nshots=100	Shadow_Grouping	0.2533775246153622	0.3119683384557085	1761139182.0605748	2025-10-22T15:19:42	100
+BeH2_molecule_JW_sto3g_Shadow_Grouping_Nshots=100	Shadow_Grouping	0.2475025515404129	0.28659154303946	1761139223.1727552	2025-10-22T15:20:23	100
+BeH2_molecule_JW_sto3g_Shadow_Grouping_Nshots=100	Shadow_Grouping	0.22623038920569383	0.2671313505496078	1761139261.5174494	2025-10-22T15:21:01	100

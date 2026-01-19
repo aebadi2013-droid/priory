@@ -1,0 +1,3 @@
+run_label	method	rmse	rmse_std	t_end_epoch	t_end_iso	num_steps
+LiH_molecule_JW_sto3g_Shadow_Grouping_Update6_Nshots=1334	Shadow_Grouping_Update6	0.01978502193288426	0.013090406616141663	1760193600.163925	2025-10-11T16:40:00	1334
+LiH_molecule_JW_sto3g_Shadow_Grouping_Update6_Nshots=1334	Shadow_Grouping_Update6	0.022590707197956094	0.018764350305960516	1760199775.2362745	2025-10-11T18:22:55	1334

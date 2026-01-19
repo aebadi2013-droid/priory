@@ -1,0 +1,2 @@
+run_label	method	rmse	rmse_std	t_end_epoch	t_end_iso	num_steps
+LiH_molecule_JW_sto3g_Priori_Nshots=5000	Priori	0.010449674800028142	0.00741713561557374	1760974993.0038168	2025-10-20T17:43:13	5000

@@ -1,0 +1,2 @@
+run_root	method	A	c	n_points_fit	Nmin_fit
+LiH_molecule_BK_sto3g_BK_	Shadow_Grouping	7.53238557e-01	0.00153635	5	1000

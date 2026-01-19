@@ -1,6 +1,11 @@
 import numpy as np
+import networkx as nx
 from itertools import product
 from time import time
+import numbers
+from numba import njit
+from shadowgrouping_v2.helper_functions import (setting_to_str, char_to_int, hit_by_numba, hit_by_batch_numba, sample_obs_batch_from_setting_numba, prepare_settings_for_numba, setting_to_obs_form, sample_obs_batch_from_setting_batch_numba)
+from shadowgrouping_v2.guarantees import (get_epsilon_Chebyshev_scalar_tighter_numba, get_epsilon_Chebyshev_scalar_numba, get_epsilon_Hoeffding_scalar_tighter_numba, get_epsilon_Hoeffding_scalar_numba, get_epsilon_Bernstein_scalar, get_epsilon_Bernstein_scalar_no_restricted_validity, get_epsilon_Bernstein_scalar_tighter_no_restricted_validity, Guaranteed_accuracy)
 
 ##########################################################################################
 ### Helper functions #####################################################################
@@ -163,6 +168,77 @@ class Measurement_scheme:
         if epsilon > 2*norm*(1+2*norm/norm2):
             print("Warning! Epsilon out of validity range.")
         return epsilon
+
+    def get_epsilon_Bernstein_no_restricted_validity(self,delta):
+        """ Return the epsilon such that the corresponding Bernstein bound is not larger than delta.
+            If at least one of the N_hits is 0, epsilon is set equal to infinity.
+            Else, epsilon = sigma * [1 + sqrt(2 log(1/delta)) ] + 2B/3 * log(1/delta)
+        """
+        if np.min(self.N_hits) == 0:
+            return np.infty
+        w_abs  = np.abs(self.w)
+        w_abs /= np.sqrt(self.N_hits)
+        sigma  = 2 * np.sum(w_abs) # Eq. (25), Supp. Inf. of published version of ShadowGrouping paper
+
+        w_abs /= np.sqrt(self.N_hits)
+        B = 2 * np.sum(w_abs) # Eq. (23), Supp. Inf. of published version of ShadowGrouping paper
+        epsilon = sigma * ( 1 + np.sqrt(-2*np.log(delta)) ) - 2*B*np.log(delta)/3
+        return epsilon
+
+
+    def get_epsilon_Bernstein_no_restricted_validity_v2(self,delta,split=False):
+        """ Returns the epsilon such that the corresponding Bernstein bound is not larger than delta.
+            If at least one of the N_hits is 0, associated systematic error is accounted for.
+            Else, epsilon = sigma * [1 + sqrt(2 log(1/delta)) ] + 2B/3 * log(1/delta).
+            split = True provides statistical and systematic errors separately, otherwise they are summed.
+        """
+    
+        if not (0 < delta < 1):
+            raise ValueError("delta must be in the interval (0,1)")
+    
+        # systematic error due to observables that have not been measured even once
+        eps_sys = np.sum(np.abs(self.w[self.N_hits == 0]))
+    
+        # statistical error due to observables with at least one sample
+        if np.sum(self.N_hits > 0) > 0:
+            w_abs  = np.abs(self.w[self.N_hits > 0])
+            w_abs /= np.sqrt(self.N_hits[self.N_hits > 0])
+            sigma  = 2 * np.sum(w_abs) # Eq. (25), Supp. Inf. of published version of ShadowGrouping paper
+    
+            w_abs /= np.sqrt(self.N_hits[self.N_hits > 0])
+            """B = 4 * np.sum(w_abs) # Eq. (23), Supp. Inf. of published version of ShadowGrouping paper
+                                  # and extra factor of 2 from Eq. (14) as well"""
+            B = 2 * np.sum(w_abs) # Eq. (23), Supp. Inf. of published version of ShadowGrouping paper
+            eps_stat = sigma * ( 1 + np.sqrt(-2*np.log(delta)) ) - 2*B*np.log(delta)/3
+        else:
+            eps_stat = 0.0
+
+        if split:
+            return eps_stat, eps_sys
+        else:
+            return eps_stat + eps_sys
+
+    def get_epsilon_Bernstein_no_restricted_validity_v3(self, delta):
+        """Return epsilon such that the corresponding Bernstein bound is not larger than delta.
+           Terms with N_hits == 0 are ignored.
+           epsilon = sigma * [1 + sqrt(2 log(1/delta)) ] + 2B/3 * log(1/delta)
+        """
+        # Mask out zero entries
+        mask = self.N_hits > 0
+    
+        if not np.any(mask):  # all N_hits are zero
+            return np.infty
+    
+        w_abs = np.abs(self.w[mask]) / np.sqrt(self.N_hits[mask])
+        sigma = 2 * np.sum(w_abs)  # Eq. (25)
+    
+        w_abs = np.abs(self.w[mask]) / self.N_hits[mask]
+        B = 2 * np.sum(w_abs)  # Eq. (23)
+    
+        epsilon = sigma * (1 + np.sqrt(-2 * np.log(delta))) - (2 * B * np.log(delta) / 3)
+        return epsilon
+
+
         
 class Shadow_Grouping(Measurement_scheme):
     """ Grouping method based on weights obtained from classical shadows.
@@ -179,8 +255,14 @@ class Shadow_Grouping(Measurement_scheme):
     
     def __init__(self,observables,weights,epsilon,weight_function):
         super().__init__(observables,weights,epsilon)
+        #self.settings_dict = {} 22222222222
         self.N_hits = np.zeros_like(self.N_hits)
         self.weight_function = weight_function
+        self.rounds = []
+        self.eps_values_v3 = []
+        self.inconfidence = []
+        self.provablegaurantee = []
+        self.round_num = 0
         if self.weight_function is not None:
             test = self.weight_function(self.w,self.eps,self.N_hits)
             assert len(test) == len(self.w), "Weight function is supposed to return an array of shape {} (i.e. number of observables) but returned an array of shape {}".format(self.w.shape,test.shape)
@@ -189,6 +271,7 @@ class Shadow_Grouping(Measurement_scheme):
     
     def reset(self):
         self.N_hits = np.zeros_like(self.N_hits)
+        #self.settings_dict = {} 22222222222
         return
     
     def get_inconfidence_bound(self):
@@ -208,7 +291,17 @@ class Shadow_Grouping(Measurement_scheme):
         weights = self.weight_function(self.w,self.eps,self.N_hits)
         order = np.argsort(weights)
         setting = np.zeros(self.num_qubits,dtype=int)
+        #print("N_hits before update:", self.N_hits)
+        #if not np.any(self.N_hits) == 0:
+            #print("now every observable is checked at least once")
+        # Get highest-weight observable
 
+        # Get highest-weight observable
+        # first_idx = order[-1]  # last one in ascending sort = highest weight
+        # first_obs = self.obs[first_idx]
+        # center_node = tuple(first_obs)  # Use tuple as dictionary key
+        # print("center node is", first_idx, "and its weight is", weights[first_idx])
+        
         if verbose:
             print("Checking list of observables.")
         tstart = time()
@@ -231,15 +324,35 @@ class Shadow_Grouping(Measurement_scheme):
         # update number of hits
         is_hit = np.array([hit_by(o,setting) for o in self.obs],dtype=bool)
         self.N_hits += is_hit
-        
+        delta = 0.02
+        self.round_num += 1
+        self.rounds.append(len(self.rounds) + 1)
         # further info for comparisons
         info = {}
         info["total_weight"] = np.sum(weights[is_hit])
         info["inconfidence_bound"] = self.get_inconfidence_bound()
         info["Bernstein bound"] = self.get_Bernstein_bound()
+        info["Provable Gaurantee"] = Guaranteed_accuracy(delta, self.N_hits, self.w, split=False)
         info["run_time"] = tend - tstart
+        info["epsilon_Bernstein"] = self.get_epsilon_Bernstein(delta)
+        info["epsilon_Bernstein_no_restricted_validity_v2"] = self.get_epsilon_Bernstein_no_restricted_validity_v2(delta)
+        #print("epsilon_Bernstein_no_restricted_validity_v2:", info["epsilon_Bernstein_no_restricted_validity_v2"])
+        info["epsilon_Bernstein_no_restricted_validity_v3"] = self.get_epsilon_Bernstein_no_restricted_validity_v3(delta)
+        info["epsilon_Bernstein_scalar_no_restricted_validity"] = get_epsilon_Bernstein_scalar_no_restricted_validity(delta, self.N_hits, self.w, split=False)
+        self.eps_values_v3.append(info["epsilon_Bernstein_no_restricted_validity_v2"])
+        self.inconfidence.append(info["inconfidence_bound"])
+        #print("epsilon_Bernstein_scalar_no_restricted_validity:", info["epsilon_Bernstein_scalar_no_restricted_validity"])
+        #self.eps_values_v3.append(info["epsilon_Bernstein_no_restricted_validity_v3"])
+        info["epsilon_Bernstein_no_restricted_validity"] = self.get_epsilon_Bernstein_no_restricted_validity(delta)
+        print("round number", self.round_num)
+        print("epsilon_Bernstein_no_restricted_validity:", info["epsilon_Bernstein_no_restricted_validity"])
+        print("epsilon_Bernstein_no_restricted_validity_v2:", info["epsilon_Bernstein_no_restricted_validity_v2"])
+        #print("Inconfidence Bound :", info["inconfidence_bound"])
+        #print("Provable Gauarantee :", info["Provable Gaurantee"])
+        self.provablegaurantee.append(info["Provable Gaurantee"])
         if verbose:
             print("Finished assigning with total weight of",info["total_weight"])
+        #print("update0 info is",info)
         return setting, info
     
 class Brute_force_matching(Shadow_Grouping):
@@ -435,7 +548,7 @@ class SettingSampler(Measurement_scheme):
         return Q, {"N_samples": N_samples}
     
 class Derandomization(Shadow_Grouping):
-    
+
     """ Finds the next measurement setting following the derandomization procedure.
         Optionally, a parameter delta in [0,1] can be provided to vary the degree of randomness (delta == 1 fully random, delta == 0 as proposed).
         If num_measurements is provided, the corresponding inconfidence bound is adapted to that.
@@ -582,4 +695,247 @@ class Derandomization(Shadow_Grouping):
             #print("Finished assigning with total weight of",info["total_weight"])
         
         return np.array(self.last_assignment), info
+
+
+
+import networkx as nx
+import matplotlib.pyplot as plt
+
+class DomClique(Measurement_scheme):
+    def __init__(self, observables, weights):
+        """
+        Initialize the QubitGraphAnalyzer with observables and weights.
+        
+        Args:
+            observables (list): A list of observables.
+            weights (list): A list of weights corresponding to the observables.
+        """
+        if len(observables) != len(weights):
+            raise ValueError("The length of 'observables' and 'weights' must be the same.")
+        
+        self.observables = observables
+        self.obs = observables
+        self.w = weights
+        self.graph = nx.Graph()
+        self.num_qubits = observables.shape[1]  # Assuming observables is a NumPy array
+        self.is_adaptive = False
+        self.twe, self.tcwe = 0, 0  # Edge weight calculations
+        self.nwe, self.tnwe = 0, 0  # Node weight calculations
+        self.lwe, self.tlwe = 0, 0  # Local weight calculations
+        self.wavg = np.zeros(len(observables))
+        #self.neighbournum = np.zeros(len(observables))
+        self.nodeweight = np.zeros(len(observables))
+        #self._build_graph()
+        #self.update_variance_estimate()
+        self.is_sampling = True
+        # Initialize N_hits as a dictionary or any other structure you need
+        self.N_hits = np.zeros(len(observables),dtype=int)
+        self._build_graph()  
+        self.neighbournum = {node: len(list(self.graph.neighbors(node))) for node in self.graph.nodes}
+        self.sort_nodes()
+        self.greedy_ndominating_set()
+        self.maximal_cliques()
+        
+
+    def reset(self):
+        """
+        Reset all attributes to their initial state, clearing the graph and any computed properties.
+        """
+        # Clear the graph
+        self.graph.clear()
+        # Reset graph-related weights and totals
+        self.twe, self.tcwe = 0, 0  # Edge weight calculations
+        self.nwe, self.tnwe = 0, 0  # Node weight calculations
+        self.lwe, self.tlwe = 0, 0  # Local weight calculations
+        self.N_hits = np.zeros(len(self.N_hits),dtype=int)
+
+        # Reset node attributes
+        self.wavg = np.zeros(len(self.observables))
+        #self.neighbournum = np.zeros(len(self.observables))
+        self.nodeweight = np.zeros(len(self.observables))
+        #self.update_variance_estimate()
+
+    def find_setting(self):
+        #print("shape of clique in main form",clique)
+        #print("what is dominating set",self.ndominating_set)
+        # transform into Pauli string for compatibility with parent class
+        print("maximum cliques",self.MaxCliques)
+        setting = self._clique_to_Pauli_observable()[0]  # No errors here
+        #print("Shape of the clique in DomClique:", clique.shape)
+        # update class counters
+        #clique = clique .flatten()
+        #print("Shape of the clique after flaatten:", clique.shape)
+        #if tuple(clique) not in self.N_hits:
+        #self.N_hits[tuple(clique)] = 0  # Initialize to 0
+        self.N_hits[self.MaxCliques] += 1  # Now increment safely
+
+        
+        #setting = setting [0]
+        #print("outcome setting of DomClique",setting)
+        # Print the shape of setting
+        #print("Shape of the setting in DomClique:", setting.shape)
+        #print(type(setting))  
+        #print(setting.shape)
+        setting = np.atleast_1d(setting)  # Convert scalar to array if needed
+        print("outcome of DomClique",setting)
+        return setting,{}
     
+    def _build_graph(self):
+        """Build the graph by adding edges based on commutativity."""
+        # Ensure all nodes are added to the graph before adding edges
+        for i in range(len(self.observables)):
+            self.graph.add_node(i)  # Add node unconditionally
+        # Now add edges based on commutativity
+        for i in range(len(self.observables)):
+            tavg, conn = 0, 0
+            for j in range(i + 1, len(self.observables)):
+                if hit_by(self.observables[i], self.observables[j]):
+                    we = round(np.abs(self.w[i]) * np.abs(self.w[j]), 5)
+                    self.graph.add_edge(i, j, weight=we)
+                    self.twe += we
+                    self.nwe += np.abs(self.w[i]) + np.abs(self.w[j])
+                    self.lwe += np.abs(self.w[i]) * np.abs(self.w[j])
+                    tavg += np.abs(self.w[i]) * np.abs(self.w[j])
+                    conn += 1
+
+            self.wavg[i] = 0 if conn == 0 else tavg / conn
+            #self.neighbournum[i] = conn
+            self.nodeweight[i] = tavg
+
+        # Calculate theoretical total edge and node weights
+        for i in range(len(self.observables)):
+            for j in range(i + 1, len(self.observables)):
+                self.tcwe += round(np.abs(self.w[i]) * np.abs(self.w[j]), 5)
+                self.tnwe += np.abs(self.w[i]) + np.abs(self.w[j])
+                self.tlwe += np.abs(self.w[i]) * np.abs(self.w[j])
+
+        #nx.draw(self.graph, with_labels=True, node_color='skyblue', node_size=2000, font_size=12, font_weight='bold')
+        # Return the built graph
+        return self.graph
+
+    def sort_nodes(self):
+        """
+        Sort nodes based on number of neighbours, total weight, and average weight, 
+        and print the sorted results.
+        """
+        # Sort nodes based on number of neighbours
+        self.nsorted_indices = sorted(self.neighbournum.keys(), key=lambda x: self.neighbournum[x], reverse=True)
+        return self.nsorted_indices
+
+    def greedy_ndominating_set(self):
+        """
+        Find a dominating set using a greedy algorithm based on node degrees.
+        
+        Returns:
+            set: A dominating set of nodes determined by node degrees.
+        """
+        #node_degrees = dict(self.G.degree())  # Calculate node degrees
+        #nsorted_indices = sorted(node_degrees, key=node_degrees.get, reverse=True)  # Sort nodes by degree
+
+        self.ndominating_set = set()
+        ncovered_nodes = set()
+
+        for node in self.nsorted_indices:
+            if len(ncovered_nodes) == len(self.graph.nodes):
+                break
+            if node not in ncovered_nodes:
+                self.ndominating_set.add(node)
+                ncovered_nodes.add(node)
+                ncovered_nodes.update(self.graph.neighbors(node))
+
+        return self.ndominating_set
+
+    def greedy_wdominating_set(self):
+        """
+        Find a dominating set using a greedy algorithm based on node weights.
+        
+        Returns:
+            set: A dominating set of nodes determined by node weights.
+        """
+        wsorted_indices = sorted(range(len(self.nodeweight)), key=lambda x: self.nodeweight[x], reverse=True)
+
+        wdominating_set = set()
+        wcovered_nodes = set()
+
+        for node in wsorted_indices:
+            if len(wcovered_nodes) == len(self.G.nodes):
+                break
+            if node not in wcovered_nodes:
+                wdominating_set.add(node)
+                wcovered_nodes.add(node)
+                wcovered_nodes.update(self.G.neighbors(node))
+
+        return wdominating_set
+
+    def greedy_adominating_set(self):
+        """
+        Find a dominating set using a greedy algorithm based on average node weights.
+        
+        Returns:
+            set: A dominating set of nodes determined by average node weights.
+        """
+        asorted_indices = sorted(range(len(self.wavg)), key=lambda x: self.wavg[x], reverse=True)
+
+        adominating_set = set()
+        acovered_nodes = set()
+
+        for node in asorted_indices:
+            if len(acovered_nodes) == len(self.G.nodes):
+                break
+            if node not in acovered_nodes:
+                adominating_set.add(node)
+                acovered_nodes.add(node)
+                acovered_nodes.update(self.G.neighbors(node))
+
+        return adominating_set
+
+
+    def maximal_cliques(self):
+        self.MaxCliques = []  # Initialize the list of maximal cliques
+        for v in self.ndominating_set:
+            self.neighbors = list(self.graph.neighbors(v))
+            self.subgraph_nodes = self.neighbors + [v]
+            self.subgraph = self.graph.subgraph(self.subgraph_nodes).copy()
+            self.neighborcliques = list(nx.find_cliques(self.subgraph))
+            self.cliques_sorted = sorted(self.neighborcliques, key=lambda clique: len(clique), reverse=True)
+            uncovered_nodes = set(self.subgraph.nodes())
+
+            while uncovered_nodes:
+                for clique in self.cliques_sorted:
+                    if uncovered_nodes & set(clique):
+                        self.MaxCliques.append(sorted([int(node) for node in clique]))
+                        uncovered_nodes.difference_update(clique)
+                        break
+
+        #self.bestcliques = [node for clique in self.MaxCliques for node in clique]
+        
+        return self.MaxCliques
+
+
+    def _clique_to_Pauli_observable(self):
+        """ Helper function that returns the sampled clique to a Pauli string (since qubit-wise commutativity is assumed).
+            Performs a check whether this string actually commutes with all observables within the sampled clique.
+            Returns a valid measurement setting as required for the parent class and the altered clique for further internal usage.
+        """
+        # the commutativity graph includes the identity term - we can simply drop it
+        #clique = np.array(clique[1:]) - 1 if clique[0] == 0 else np.array(clique) - 1
+        self.flattened_cliques = np.array([node for clique in self.MaxCliques for node in clique], dtype=int)-1
+        self.clique_members = self.obs[self.flattened_cliques]
+        setting = np.max(self.clique_members, axis=0)
+        filtered = setting != 0
+        self.clique_members[self.clique_members==0] = 4 # throw away identities
+        # Now, np.min(clique_members,axis=0) has to match up with its np.max(...) except where setting == 0
+        self.double_check = np.min(self.clique_members, axis=0)
+        #print("clique_members:", clique_members)
+        #print("setting:", setting)
+        #print("double_check:", double_check)
+        #print("Filtered indices:", np.where(filtered))
+        #print("Values at filtered indices (setting):", setting[filtered])
+        #print("Values at filtered indices (double_check):", double_check[filtered])
+
+        assert np.allclose(setting[filtered],self.double_check[filtered]), "The clique {} does not allow for a qubit-wise commutativity-compatible measurement setting.".format(self.MaxCliques)
+        return setting
+
+    
+
+
