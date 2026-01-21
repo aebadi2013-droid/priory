@@ -11,6 +11,7 @@ from os.path import isdir
 delta = np.logspace(-10,0,1000)
 delta = delta[delta<0.5]
 numerator = N_delta(delta)
+# shadow
 
 n_min, n_max = min(numerator), max(numerator)
 #######################################################
