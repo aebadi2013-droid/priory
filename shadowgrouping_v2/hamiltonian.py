@@ -145,6 +145,7 @@ def load_pauli_list(folder_hamiltonian,molecule_name,basis_name,encoding,verbose
     
     # extract Pauli list from file
     full_file_name = os.path.join(folder_hamiltonian,folder_name,file_name)
+    print(f"Loaded file: {full_file_name}")
     data = np.loadtxt(full_file_name,dtype=object)
     paulis, weights = data[::2].astype(str), data[1::2].astype(complex).real
     
