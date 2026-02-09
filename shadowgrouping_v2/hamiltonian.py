@@ -123,6 +123,7 @@ def load_pauli_list(folder_hamiltonian,molecule_name,basis_name,encoding,verbose
 
     # look for encoding and energy file
     available_files = os.listdir(full_folder_path)
+    print(f"full path to floder",full_folder_path)
     file_name = None
     file_energy = None
     for file in available_files:
@@ -145,7 +146,6 @@ def load_pauli_list(folder_hamiltonian,molecule_name,basis_name,encoding,verbose
     
     # extract Pauli list from file
     full_file_name = os.path.join(folder_hamiltonian,folder_name,file_name)
-    print(f"Loaded file: {full_file_name}")
     data = np.loadtxt(full_file_name,dtype=object)
     paulis, weights = data[::2].astype(str), data[1::2].astype(complex).real
     
@@ -179,6 +179,7 @@ def load_pauli_list(folder_hamiltonian,molecule_name,basis_name,encoding,verbose
     
     # print some to console
     if verbose:
+        print("check for print")
         print("Offset","\t\t",offset)
         for i, (p, we) in enumerate(zip(obs, w)):
             print(p,"\t",we)
