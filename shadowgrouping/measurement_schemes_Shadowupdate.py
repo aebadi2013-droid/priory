@@ -2548,6 +2548,289 @@ class Posteriori(Measurement_scheme):
         return setting, info
 
 
+class ShadowBucket(Measurement_scheme):
+    """ do shadowgrouping and store the generated settings at the same time, in next rounds, compare the epsilon of the shadow clique with the epsilon of the best clique from the cache and select the best one.
+    """
+    
+    def __init__(self, observables, weights, epsilon, weight_function):
+        # Convert Pauli strings to arrays FIRST
+        #observablesarray = [pauli_string_to_array(o) for o in observables]
+    
+        # Then pass converted observables into super().__init__()
+        #super().__init__(observablesarray, weights, epsilon)
+        super().__init__(observables,weights,epsilon)
+        #self.settings_dict = {} 222222222222
+        self.N_hits = np.zeros_like(self.N_hits)
+        self.weight_function = weight_function
+        self.round_num = 0
+        self.rounds = []
+        self.eps_values_v3 = []
+        self.provablegaurantee = []
+        self.inconfindence = []
+        self.shadow_was_best_count = 0
+        self._cached_settings = []
+        
+        if self.weight_function is not None:
+            test = self.weight_function(self.w, self.eps, self.N_hits)
+            assert len(test) == len(self.w), (
+                "Weight function is supposed to return an array of shape {} "
+                "(i.e. number of observables) but returned an array of shape {}".format(self.w.shape, test.shape)
+            )
+        self.is_sampling = False
+        return
+
+    
+    def reset(self):
+        self.N_hits = np.zeros_like(self.N_hits)
+        #self.settings_dict = {} 2222222222222
+        return
+
+    # Equation 27,28 and 29
+    def get_inconfidence_bound(self):
+        inconf = np.exp( -0.5*self.eps*self.eps*self.N_hits/(self.w**2) )
+        return np.sum(inconf)
+
+    #Equation 22
+    def get_Bernstein_bound(self):
+        if np.min(self.N_hits) == 0:
+            bound = -1
+        else:
+            bound = np.exp(-0.25*(self.eps/2/np.sum(np.abs(self.w)/np.sqrt(self.N_hits))-1)**2)
+        return bound            
+
+    def total_hit_weight(self, weights, is_hit):
+        weights = np.asarray(weights, dtype=float)
+        is_hit = np.asarray(is_hit, dtype=bool)
+        return (weights * is_hit).sum()
+    
+    def find_setting(self,verbose=False):
+        """ Finds the next measurement setting. Can be verbosed to gain further information during the procedure. """
+        #if self._cached_graph is None or self._cached_cliques is None:
+        #    self.build_graph_and_cliques()
+        
+        weights = self.weight_function(self.w, self.eps, self.N_hits)
+        tstart = time()
+        order = np.argsort(weights)
+        completecliques = 0
+        #self.cliques_with_epsilon = []
+        delta = 0.02
+        #alpha = 51733.57
+        incompletesetting = 0
+        if np.any(self.N_hits == 0):
+            """settinglist = []
+            if self.cliques_with_epsilon:
+                settingslist = [s for _, s in self.cliques_with_epsilon]"""
+            self.cliques_with_epsilon = []
+            shadowcliquesetting = np.zeros(self.num_qubits,dtype=int)
+            for idx in reversed(order):
+                o = self.obs[idx]
+                if verbose:
+                    print("Checking",o)
+                if hit_by(o,shadowcliquesetting):
+                    non_id = o!=0
+                    # overwrite those qubits that fall in the support of o
+                    shadowcliquesetting[non_id] = o[non_id]
+                if verbose:
+                    print("p =",setting)
+                # break sequence is case all identities in setting are exhausted
+                if np.min(shadowcliquesetting) > 0:
+                    break
+            if not any(np.array_equal(existing, shadowcliquesetting) for existing in self._cached_settings):
+                self._cached_settings.append(shadowcliquesetting.copy())
+            #for setting_candidate in self.clean_setting_cache[center_node]:
+            #for cached_settings in self._cached_settings.values(): #ggggggg Start
+            for setting_candidate in self._cached_settings:
+                working = setting_candidate.copy()
+                #print(working)
+                """if np.min(setting_candidate) == 0:
+                    if settinglist:
+                        for o in settingslist:
+                            if verbose:
+                                print("Checking",o)
+                            if hit_by(o,setting_candidate):
+                                non_id = o!=0
+                                setting_candidate[non_id] = o[non_id]
+                            if verbose:
+                                print("p =",setting_candidate)
+                            if np.min(setting_candidate) > 0:
+                                print("completed setting using setting list")
+                                break"""
+                if np.min(working) == 0:
+                    #print(working)
+                    incompletesetting += 1
+                    for idx in reversed(order):
+                        o = self.obs[idx]
+                        if verbose:
+                            print("Checking",o)
+                        if hit_by(o,working):
+                            non_id = o!=0
+                            # overwrite those qubits that fall in the support of o
+                            working[non_id] = o[non_id]
+                        if verbose:
+                            print("p =",working)
+                        # break sequence is case all identities in setting are exhausted
+                        if np.min(working) > 0:
+                            break
+                    completecliques += 1
+                else:
+                    completecliques += 1
+                is_hit_candidate = []
+                is_hit_candidate = hit_by_batch_numba(self.obs , working)
+                self.cliques_with_epsilon.append((self.total_hit_weight(weights, is_hit_candidate), working))
+                #self.N_hits += is_hit_candidate
+                #self.cliques_with_epsilon.append((self.get_epsilon_Bernstein_no_restricted_validity_v2(delta), setting_candidate))
+                #self.N_hits -= is_hit_candidate #ggggg end
+            is_hit_candidate = []
+            is_hit_candidate = hit_by_batch_numba(self.obs , shadowcliquesetting)
+            self.cliques_with_epsilon.append((self.total_hit_weight(weights, is_hit_candidate), shadowcliquesetting))
+            #self.cliques_with_epsilon.append((self.total_hit_weight(weights, is_hit_candidate), setting_candidate))
+            #self.N_hits += is_hit_candidate
+            #self.cliques_with_epsilon.append((self.get_epsilon_Bernstein_no_restricted_validity_v2(delta), shadowcliquesetting))
+            #self.cliques_with_epsilon.append((self.get_Bernstein_bound(), shadowcliquesetting))
+            #print("epsilon for shadow clique is",self.get_epsilon_Bernstein_no_restricted_validity(delta))
+            #self.N_hits -= is_hit_candidate
+            self.N_hits += is_hit_candidate
+            epsilon_shadow = self.get_epsilon_Bernstein_no_restricted_validity_v2(delta)
+            self.N_hits -= is_hit_candidate
+            self.cliques_with_epsilon.sort(key=lambda x: x[0], reverse = True)
+            print("length of cliques with epsilon is", len(self.cliques_with_epsilon))
+            print("number of incomplete settings", incompletesetting)
+            _, best_clique = self.cliques_with_epsilon[0]
+            if (len(best_clique) == len(shadowcliquesetting) and all(np.array_equal(a, b) for a, b in zip(best_clique, shadowcliquesetting))):
+                self.shadow_was_best_count += 1
+            else:
+                print("epsilon for best clique is",self.cliques_with_epsilon[0])
+            setting = best_clique
+            is_hit_candidate = []
+            is_hit_candidate = hit_by_batch_numba(self.obs , best_clique)
+            self.N_hits += is_hit_candidate
+            epsilon_best = self.get_epsilon_Bernstein_no_restricted_validity_v2(delta)
+            self.N_hits -= is_hit_candidate
+        else:
+            #for cached_settings in self._cached_settings.values(): #ggggggg Start
+            #self.cliques_with_epsilon = []
+            """settinglist = []
+            settingslist = [s for _, s in self.cliques_with_epsilon]"""
+            self.cliques_with_epsilon = []
+            shadowcliquesetting = np.zeros(self.num_qubits,dtype=int)
+            for idx in reversed(order):
+                o = self.obs[idx]
+                if verbose:
+                    print("Checking",o)
+                if hit_by(o,shadowcliquesetting):
+                    non_id = o!=0
+                    # overwrite those qubits that fall in the support of o
+                    shadowcliquesetting[non_id] = o[non_id]
+                if verbose:
+                    print("p =",setting)
+                # break sequence is case all identities in setting are exhausted
+                if np.min(shadowcliquesetting) > 0:
+                    break
+            if not any(np.array_equal(existing, shadowcliquesetting) for existing in self._cached_settings):
+                self._cached_settings.append(shadowcliquesetting.copy())
+            for setting_candidate in self._cached_settings:
+                working = setting_candidate.copy()
+                #print(working)
+                """if np.min(setting_candidate) == 0:
+                    for o in settingslist:
+                        if verbose:
+                            print("Checking",o)
+                        if hit_by(o,setting_candidate):
+                            non_id = o!=0
+                            setting_candidate[non_id] = o[non_id]
+                        if verbose:
+                            print("p =",setting_candidate)
+                        if np.min(setting_candidate) > 0:
+                            print("completed setting using setting list")
+                            break"""
+                if np.min(working) == 0:
+                    incompletesetting += 1
+                    for idx in reversed(order):
+                        o = self.obs[idx]
+                        if verbose:
+                            print("Checking",o)
+                        if hit_by(o,working):
+                            non_id = o!=0
+                            # overwrite those qubits that fall in the support of o
+                            working[non_id] = o[non_id]
+                        if verbose:
+                            print("p =",working)
+                        # break sequence is case all identities in setting are exhausted
+                        if np.min(working) > 0:
+                            break
+                    completecliques += 1
+                else:
+                    completecliques += 1
+                is_hit_candidate = []
+                is_hit_candidate = hit_by_batch_numba(self.obs , working)
+                #self.cliques_with_epsilon.append((self.total_hit_weight(weights, is_hit_candidate), setting_candidate))
+                self.N_hits += is_hit_candidate
+                self.cliques_with_epsilon.append((self.get_epsilon_Bernstein_no_restricted_validity_v3(delta), working))
+                #self.cliques_with_epsilon.append((get_epsilon_Bernstein_scalar_no_restricted_validity(delta, self.N_hits, self.w, split=False), setting_candidate))
+                self.N_hits -= is_hit_candidate #ggggg end
+            is_hit_candidate = []
+            is_hit_candidate = hit_by_batch_numba(self.obs , shadowcliquesetting)
+            #self.cliques_with_epsilon.append((self.total_hit_weight(weights, is_hit_candidate), shadowcliquesetting))
+            #self.cliques_with_epsilon.append((self.total_hit_weight(weights, is_hit_candidate), setting_candidate))
+            self.N_hits += is_hit_candidate
+            self.cliques_with_epsilon.append((self.get_epsilon_Bernstein_no_restricted_validity_v3(delta), shadowcliquesetting))
+            epsilon_shadow = self.get_epsilon_Bernstein_no_restricted_validity_v2(delta)
+            #self.cliques_with_epsilon.append((get_epsilon_Bernstein_scalar_no_restricted_validity(delta, self.N_hits, self.w, split=False), shadowcliquesetting))
+            #self.cliques_with_epsilon.append((self.get_Bernstein_bound(), shadowcliquesetting))
+            #print("epsilon for shadow clique is",self.get_epsilon_Bernstein_no_restricted_validity(delta))
+            self.N_hits -= is_hit_candidate
+            self.cliques_with_epsilon.sort(key=lambda x: x[0])
+            print("length of cliques with epsilon is", len(self.cliques_with_epsilon))
+            _, best_clique = self.cliques_with_epsilon[0]
+            if (len(best_clique) == len(shadowcliquesetting) and all(np.array_equal(a, b) for a, b in zip(best_clique, shadowcliquesetting))):
+                self.shadow_was_best_count += 1
+            else:
+                print("epsilon for best clique is",self.cliques_with_epsilon[0])
+            setting = best_clique
+            is_hit_candidate = []
+            is_hit_candidate = hit_by_batch_numba(self.obs , best_clique)
+            self.N_hits += is_hit_candidate
+            epsilon_best = self.get_epsilon_Bernstein_no_restricted_validity_v2(delta)
+            self.N_hits -= is_hit_candidate
+
+        tend = time()
+        print("Shadow clique was selected", self.shadow_was_best_count, "times")
+        is_hit = []
+        # update number of hits
+        is_hit = hit_by_batch_numba(self.obs , setting)
+        self.N_hits += is_hit
+        delta = 0.02
+        self.round_num += 1    
+        self.rounds.append(len(self.rounds) + 1)
+        print("round number" , self.round_num)
+        # further info for comparisons
+        info = {}
+        info["total_weight"] = np.sum(weights[is_hit])
+        info["inconfidence_bound"] = self.get_inconfidence_bound()
+        info["Bernstein bound"] = self.get_Bernstein_bound()
+        info["Provable Gaurantee"] = Guaranteed_accuracy(delta, self.N_hits, self.w, split=False)
+        info["run_time"] = tend - tstart
+        info["epsilon_Bernstein_no_restricted_validity"] = self.get_epsilon_Bernstein_no_restricted_validity(delta)
+        info["epsilon_Bernstein_no_restricted_validity_v2"] = self.get_epsilon_Bernstein_no_restricted_validity_v2(delta)
+        info["epsilon_Bernstein_no_restricted_validity_v3"] = self.get_epsilon_Bernstein_no_restricted_validity_v3(delta)
+        info["epsilon_Bernstein_scalar_no_restricted_validity"] = get_epsilon_Bernstein_scalar_no_restricted_validity(delta, self.N_hits, self.w, split=False)
+        self.eps_values_v3.append(info["epsilon_Bernstein_no_restricted_validity_v2"])
+        self.inconfindence.append(info["inconfidence_bound"])
+        info["epsilon difference"]= abs(epsilon_best - epsilon_shadow)
+        #print("difference between best epsilon and shadow epsilon = ", info["epsilon difference"])
+        #self.eps_values_v3.append(info["epsilon difference"])
+        #self.eps_values_v3.append(info["epsilon_Bernstein_no_restricted_validity_v3"])
+        #print("epsilon_Bernstein_scalar_no_restricted_validity:", info["epsilon_Bernstein_scalar_no_restricted_validity"])
+        print("epsilon_Bernstein_no_restricted_validity:", info["epsilon_Bernstein_no_restricted_validity"])
+        info["epsilon_Bernstein_no_restricted_validity_v2"] = self.get_epsilon_Bernstein_no_restricted_validity_v2(delta, split=True)
+        print("epsilon_Bernstein_no_restricted_validity_v2:", info["epsilon_Bernstein_no_restricted_validity_v2"])
+        #print("Inconfidence Bound :", info["inconfidence_bound"])
+        #print("Provable Gauarantee :", info["Provable Gaurantee"])
+        self.provablegaurantee.append(info["Provable Gaurantee"])
+        if verbose:
+            print("Finished assigning with total weight of",info["total_weight"])
+        return setting, info
+
 class Shadow_Grouping_Update8(Measurement_scheme):
     """ 
         Returns p and a dictionary info holding further details on the matching procedure.
