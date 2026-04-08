@@ -134,7 +134,7 @@ def load_pauli_list(folder_hamiltonian,molecule_name,basis_name,encoding,verbose
 
     assert file_name is not None, f"File not found for encoding '{encoding}'."
     assert file_energy is not None, "File not found for ground-state energy."
-    
+    print(f"full path to file",os.path.join(full_folder_path, file_name))
     if diagonalize:
         # read ground-state energy from file
         full_file_name = os.path.join(folder_hamiltonian,folder_name,file_energy)

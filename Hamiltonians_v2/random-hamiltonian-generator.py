@@ -57,8 +57,8 @@ def gaussian_weights(input_file, output_file, center =0, width=1):
     # Plot the distribution of weights
     plot_weight_distribution(hamiltonian_terms, weights, title="Gaussian Distribution of Weights")
 
-input_file = "d:/priori/Hamiltonians_v2/LiH_sto3g_12qubits/jw.txt"
-output_file = "d:/priori/Hamiltonians_v2/LiH_sto3g_12qubits/jw_gaussian.txt"
+input_file = "d:/priori/Hamiltonians_v2/BeH2_sto3g_14qubits/jw.txt"
+output_file = "d:/priori/Hamiltonians_v2/BeH2_sto3g_14qubits/jw_gaussian.txt"
 gaussian_weights(input_file, output_file, center=0, width=1)
 
 print("Uniform distribution of weights")
@@ -99,6 +99,120 @@ def uniform_weights(input_file, output_file, a =-1, b=1):
     plt.title('Uniform Distribution of Weights')
     plt.show()
 
-input_file = "d:/priori/Hamiltonians_v2/LiH_sto3g_12qubits/jw.txt"
-output_file = "d:/priori/Hamiltonians_v2/LiH_sto3g_12qubits/jw_uniform.txt"
+input_file = "d:/priori/Hamiltonians_v2/BeH2_sto3g_14qubits/jw.txt"
+output_file = "d:/priori/Hamiltonians_v2/BeH2_sto3g_14qubits/jw_uniform.txt"
 uniform_weights(input_file, output_file, a=-1, b=1)
+
+def calculate_support_statistics_and_generate_random(input_file, output_file):
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(f"The file '{input_file}' does not exist.")
+
+    with open(input_file, 'r') as f:
+        lines = f.readlines()
+
+    support_sizes = []
+    coefficients = []
+    pauli_strings = []
+
+    # Calculate support sizes and collect coefficients
+    for i in range(0, len(lines), 2):
+        try:
+            pauli_term = lines[i].strip()
+            weight = float(complex(lines[i + 1].strip()).real)
+
+            # Calculate support size (number of non-identity terms in the Pauli string)
+            support_size = sum(1 for char in pauli_term if char != 'I')
+            support_sizes.append(support_size)
+            coefficients.append(weight)
+            pauli_strings.append(pauli_term)
+        except (ValueError, IndexError) as e:
+            print(f"Skipping invalid pair at lines {i + 1} and {i + 2}: {e}")
+
+    # Calculate average and standard deviation of support sizes
+    avg_support = np.mean(support_sizes)
+    std_support = np.std(support_sizes)
+
+    print(f"Average support size: {avg_support}, Standard deviation: {std_support}")
+
+    # Generate random Pauli strings with Gaussian-distributed support sizes
+    output_lines = []
+    for i in range(len(pauli_strings)):
+        random_support_size = int(np.random.normal(avg_support, std_support))
+        random_support_size = max(1, random_support_size)  # Ensure at least one non-identity term
+
+        # Generate a random Pauli string with the given support size
+        random_pauli = list('I' * len(pauli_strings[i]))
+        non_identity_indices = np.random.choice(len(random_pauli), random_support_size, replace=False)
+        for idx in non_identity_indices:
+            random_pauli[idx] = np.random.choice(['X', 'Y', 'Z'])
+
+        random_pauli_string = ''.join(random_pauli)
+        output_lines.append(f"{random_pauli_string}\n")
+        output_lines.append(f"({coefficients[i]:.6f}+0j)\n")
+
+    with open(output_file, 'w') as f:
+        f.writelines(output_lines)
+
+    print(f"Random Pauli strings with Gaussian-distributed support sizes written to {output_file}")
+
+
+input_file = "d:/priori/Hamiltonians_v2/BeH2_sto3g_14qubits/jw.txt"
+output_file = "d:/priori/Hamiltonians_v2/BeH2_sto3g_14qubits/jw_gaussianrandompaulis.txt"
+calculate_support_statistics_and_generate_random(input_file, output_file)
+
+
+def calculate_support_statistics_and_generate_uniform(input_file, output_file):
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(f"The file '{input_file}' does not exist.")
+
+    with open(input_file, 'r') as f:
+        lines = f.readlines()
+
+    support_sizes = []
+    coefficients = []
+    pauli_strings = []
+
+    # Calculate support sizes and collect coefficients
+    for i in range(0, len(lines), 2):
+        try:
+            pauli_term = lines[i].strip()
+            weight = float(complex(lines[i + 1].strip()).real)
+
+            # Calculate support size (number of non-identity terms in the Pauli string)
+            support_size = sum(1 for char in pauli_term if char != 'I')
+            support_sizes.append(support_size)
+            coefficients.append(weight)
+            pauli_strings.append(pauli_term)
+        except (ValueError, IndexError) as e:
+            print(f"Skipping invalid pair at lines {i + 1} and {i + 2}: {e}")
+
+    # Calculate average and standard deviation of support sizes
+    avg_support = np.mean(support_sizes)
+    std_support = np.std(support_sizes)
+
+    print(f"Average support size: {avg_support}, Standard deviation: {std_support}")
+
+    # Generate random Pauli strings with uniformly-distributed support sizes
+    output_lines = []
+    for i in range(len(pauli_strings)):
+        random_support_size = np.random.randint(max(1, int(avg_support - std_support)), int(avg_support + std_support) + 1)
+
+        # Generate a random Pauli string with the given support size
+        random_pauli = list('I' * len(pauli_strings[i]))
+        non_identity_indices = np.random.choice(len(random_pauli), random_support_size, replace=False)
+        for idx in non_identity_indices:
+            random_pauli[idx] = np.random.choice(['X', 'Y', 'Z'])
+
+        random_pauli_string = ''.join(random_pauli)
+        output_lines.append(f"{random_pauli_string}\n")
+        output_lines.append(f"({coefficients[i]:.6f}+0j)\n")
+
+    with open(output_file, 'w') as f:
+        f.writelines(output_lines)
+
+    print(f"Random Pauli strings with uniformly-distributed support sizes written to {output_file}")
+
+
+input_file = "d:/priori/Hamiltonians_v2/BeH2_sto3g_14qubits/jw.txt"
+output_file = "d:/priori/Hamiltonians_v2/BeH2_sto3g_14qubits/jw_uniformrandompaulis.txt"
+calculate_support_statistics_and_generate_uniform(input_file, output_file)
