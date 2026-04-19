@@ -1,6 +1,7 @@
 import numpy as np
 import numbers
 from numba import njit
+import os
 
 char_to_int = {'I': 0, 'X': 1, 'Y': 2, 'Z': 3}
 int_to_char = {0: 'I', 1: 'X', 2: 'Y', 3: 'Z'}
@@ -683,3 +684,179 @@ def bootstrap_rmse(energy_array, E_GS, n_boot=10000, ci=0.67):
     lo, hi = np.quantile(boot_values, [alpha, 1 - alpha])
     
     return rmse, se, (lo, hi), boot_values
+
+
+def gaussian_weights(input_file, center, width):
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(f"The file '{input_file}' does not exist.")
+
+    with open(input_file, 'r') as f:
+        lines = f.readlines()
+
+    output_lines = []
+    hamiltonian_terms = []  # Collect Hamiltonian terms here
+    weights = []  # Collect weights here
+    for i in range(0, len(lines), 2):
+        try:
+            pauli_term = lines[i].strip()
+            weight = float(complex(lines[i + 1].strip()).real)
+
+            # Replace the real part of the weight with a Gaussian-distributed value
+            new_weight = np.random.normal(center, width)
+            hamiltonian_terms.append(pauli_term)  # Store the Hamiltonian term
+            weights.append(new_weight)  # Store the new weight
+
+            # Append the Pauli term and new weight to the output
+            output_lines.append(f"{pauli_term}\n")
+            output_lines.append(f"({new_weight:.6f}+0j)\n")
+        except (ValueError, IndexError) as e:
+            print(f"Skipping invalid pair at lines {i + 1} and {i + 2}: {e}")
+
+    # Overwrite the input file with the new values
+    with open(input_file, 'w') as f:
+        f.writelines(output_lines)
+
+
+
+
+def uniform_weights(input_file, low, high):
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(f"The file '{input_file}' does not exist.")
+
+    with open(input_file, 'r') as f:
+        lines = f.readlines()
+
+    output_lines = []
+    hamiltonian_terms = []  # Collect Hamiltonian terms here
+    weights = []  # Collect weights here
+    for i in range(0, len(lines), 2):
+        try:
+            pauli_term = lines[i].strip()
+            weight = float(complex(lines[i + 1].strip()).real)
+
+            # Replace the real part of the weight with a uniformly-distributed value
+            new_weight = np.random.uniform(low, high)
+            hamiltonian_terms.append(pauli_term)  # Store the Hamiltonian term
+            weights.append(new_weight)  # Store the new weight
+
+            # Append the Pauli term and new weight to the output
+            output_lines.append(f"{pauli_term}\n")
+            output_lines.append(f"({new_weight:.6f}+0j)\n")
+        except (ValueError, IndexError) as e:
+            print(f"Skipping invalid pair at lines {i + 1} and {i + 2}: {e}")
+
+    # Overwrite the input file with the new values
+    with open(input_file, 'w') as f:
+        f.writelines(output_lines)
+
+
+def gaussian_random_paulis(input_file, avg_support, std_support):
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(f"The file '{input_file}' does not exist.")
+
+    with open(input_file, 'r') as f:
+        lines = f.readlines()
+
+    support_sizes = []
+    coefficients = []
+    pauli_strings = []
+
+    # Calculate support sizes and collect coefficients
+    for i in range(0, len(lines), 2):
+        try:
+            pauli_term = lines[i].strip()
+            weight = float(complex(lines[i + 1].strip()).real)
+
+            # Calculate support size (number of non-identity terms in the Pauli string)
+            support_size = sum(1 for char in pauli_term if char != 'I')
+            support_sizes.append(support_size)
+            coefficients.append(weight)
+            pauli_strings.append(pauli_term)
+        except (ValueError, IndexError) as e:
+            print(f"Skipping invalid pair at lines {i + 1} and {i + 2}: {e}")
+
+    # Calculate average and standard deviation of support sizes
+    #avg_support = np.mean(support_sizes)
+    #std_support = np.std(support_sizes)
+
+    #avg_support = 5.8
+    #std_support = 1
+
+    #print(f"Average support size: {avg_support}, Standard deviation: {std_support}")
+
+    # Generate random Pauli strings with Gaussian-distributed support sizes
+    output_lines = []
+    for i in range(len(pauli_strings)):
+        random_support_size = int(np.random.normal(avg_support, std_support))
+        #random_support_size = max(1, random_support_size)  # Ensure at least one non-identity term
+        random_support_size = max(1, min(random_support_size, 14))  # Clamp between 1 and 14
+
+        # Generate a random Pauli string with the given support size
+        random_pauli = list('I' * len(pauli_strings[i]))
+        non_identity_indices = np.random.choice(len(random_pauli), random_support_size, replace=False)
+        for idx in non_identity_indices:
+            random_pauli[idx] = np.random.choice(['X', 'Y', 'Z'])
+
+        random_pauli_string = ''.join(random_pauli)
+        output_lines.append(f"{random_pauli_string}\n")
+        output_lines.append(f"({coefficients[i]:.6f}+0j)\n")
+
+    with open(input_file, 'w') as f:
+        f.writelines(output_lines)
+
+    #print(f"Random Pauli strings with Gaussian-distributed support sizes written to {input_file}")
+
+
+def uniform_random_paulis(input_file, avg_support, std_support):
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(f"The file '{input_file}' does not exist.")
+
+    with open(input_file, 'r') as f:
+        lines = f.readlines()
+
+    support_sizes = []
+    coefficients = []
+    pauli_strings = []
+
+    # Calculate support sizes and collect coefficients
+    for i in range(0, len(lines), 2):
+        try:
+            pauli_term = lines[i].strip()
+            weight = float(complex(lines[i + 1].strip()).real)
+
+            # Calculate support size (number of non-identity terms in the Pauli string)
+            support_size = sum(1 for char in pauli_term if char != 'I')
+            support_sizes.append(support_size)
+            coefficients.append(weight)
+            pauli_strings.append(pauli_term)
+        except (ValueError, IndexError) as e:
+            print(f"Skipping invalid pair at lines {i + 1} and {i + 2}: {e}")
+
+    # Calculate average and standard deviation of support sizes
+    #avg_support = np.mean(support_sizes)
+    #std_support = np.std(support_sizes)
+
+    #avg_support = 5.8
+    #std_support = 1
+
+    #print(f"Average support size: {avg_support}, Standard deviation: {std_support}")
+
+    # Generate random Pauli strings with uniformly-distributed support sizes
+    output_lines = []
+    for i in range(len(pauli_strings)):
+        random_support_size = np.random.randint(max(1, int(avg_support - std_support)), int(avg_support + std_support) + 1)
+        random_support_size = max(1, min(random_support_size, 14))  # Clamp between 1 and 14
+        # Generate a random Pauli string with the given support size
+        random_pauli = list('I' * len(pauli_strings[i]))
+        non_identity_indices = np.random.choice(len(random_pauli), random_support_size, replace=False)
+        for idx in non_identity_indices:
+            random_pauli[idx] = np.random.choice(['X', 'Y', 'Z'])
+
+        random_pauli_string = ''.join(random_pauli)
+        output_lines.append(f"{random_pauli_string}\n")
+        output_lines.append(f"({coefficients[i]:.6f}+0j)\n")
+
+    with open(input_file, 'w') as f:
+        f.writelines(output_lines)
+
+    #print(f"Random Pauli strings with uniformly-distributed support sizes written to {input_file}")

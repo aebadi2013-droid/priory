@@ -123,7 +123,8 @@ def load_pauli_list(folder_hamiltonian,molecule_name,basis_name,encoding,verbose
 
     # look for encoding and energy file
     available_files = os.listdir(full_folder_path)
-    print(f"full path to floder",full_folder_path)
+    
+    #print(f"full path to folder",full_folder_path)
     file_name = None
     file_energy = None
     for file in available_files:
@@ -134,8 +135,10 @@ def load_pauli_list(folder_hamiltonian,molecule_name,basis_name,encoding,verbose
 
     assert file_name is not None, f"File not found for encoding '{encoding}'."
     assert file_energy is not None, "File not found for ground-state energy."
-    print(f"full path to file",os.path.join(full_folder_path, file_name))
+    
+    #print(f"full path to file",os.path.join(full_folder_path, file_name))
     if diagonalize:
+        print("Diagonalizing Hamiltonian to obtain numerical estimate for the ground-state energy...")
         # read ground-state energy from file
         full_file_name = os.path.join(folder_hamiltonian,folder_name,file_energy)
         with open(full_file_name,"r") as f:
@@ -153,6 +156,8 @@ def load_pauli_list(folder_hamiltonian,molecule_name,basis_name,encoding,verbose
         # use Pauli list to create Hamiltonian and diagonalize it afterwards to obtain ground-state
         H = Hamiltonian(weights,paulis)
         E_numerics, state = H.ground(sparse=sparse)
+        print("Recorded:",E_GS)
+        print("Calculated:",E_numerics)
         if abs(E_GS-E_numerics) >= 1e-6:
             print("Warning: Recorded value for the energy deviates significantly from numerical estimate!")
             print("Recorded:",E_GS)

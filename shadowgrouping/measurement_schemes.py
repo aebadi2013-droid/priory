@@ -166,7 +166,8 @@ class Measurement_scheme:
         norm2  = np.sum(w_abs)
         epsilon = norm * np.sqrt(N_delta(delta))
         if epsilon > 2*norm*(1+2*norm/norm2):
-            print("Warning! Epsilon out of validity range.")
+            #print("Warning! Epsilon out of validity range.")
+            pass
         return epsilon
 
     def get_epsilon_Bernstein_no_restricted_validity(self,delta):
@@ -344,9 +345,11 @@ class Shadow_Grouping(Measurement_scheme):
         #print("epsilon_Bernstein_scalar_no_restricted_validity:", info["epsilon_Bernstein_scalar_no_restricted_validity"])
         #self.eps_values_v3.append(info["epsilon_Bernstein_no_restricted_validity_v3"])
         info["epsilon_Bernstein_no_restricted_validity"] = self.get_epsilon_Bernstein_no_restricted_validity(delta)
-        print("round number", self.round_num)
-        print("epsilon_Bernstein_no_restricted_validity:", info["epsilon_Bernstein_no_restricted_validity"])
-        print("epsilon_Bernstein_no_restricted_validity_v2:", info["epsilon_Bernstein_no_restricted_validity_v2"])
+        if verbose:
+            print("round number", self.round_num)
+            print("epsilon_Bernstein_no_restricted_validity:", info["epsilon_Bernstein_no_restricted_validity"])
+        if verbose:
+            print("epsilon_Bernstein_no_restricted_validity_v2:", info["epsilon_Bernstein_no_restricted_validity_v2"])
         #print("Inconfidence Bound :", info["inconfidence_bound"])
         #print("Provable Gauarantee :", info["Provable Gaurantee"])
         self.provablegaurantee.append(info["Provable Gaurantee"])
