@@ -1046,7 +1046,7 @@ class Priori(Measurement_scheme):
         order = np.argsort(weights)
         completecliques = 0
         #self.cliques_with_epsilon = []
-        delta = 0.02
+        delta = 0.33
         #alpha = 51733.57
         incompletesetting = 0
         if np.any(self.N_hits == 0):
@@ -1238,7 +1238,7 @@ class Priori(Measurement_scheme):
         # update number of hits
         is_hit = hit_by_batch_numba(self.obs , setting)
         self.N_hits += is_hit
-        delta = 0.02
+        delta = 0.33
         self.round_num += 1    
         self.rounds.append(len(self.rounds) + 1)
         if verbose:

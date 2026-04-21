@@ -325,7 +325,7 @@ class Shadow_Grouping(Measurement_scheme):
         # update number of hits
         is_hit = np.array([hit_by(o,setting) for o in self.obs],dtype=bool)
         self.N_hits += is_hit
-        delta = 0.02
+        delta = 0.33
         self.round_num += 1
         self.rounds.append(len(self.rounds) + 1)
         # further info for comparisons

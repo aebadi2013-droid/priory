@@ -6,6 +6,10 @@ from qiskit.algorithms import NumPyMinimumEigensolver
 from qiskit_nature.algorithms import GroundStateEigensolver
 from qiskit.quantum_info import Pauli
 from qiskit.opflow import PauliOp, SummedOp
+from qiskit.circuit import ParameterVector
+from qiskit.quantum_info import SparsePauliOp
+
+
 
 import numpy as np, os
 from scipy.sparse.linalg import eigsh
@@ -13,6 +17,38 @@ from shadowgrouping_v2.helper_functions import char_to_int
 
 # list of available mappings
 mappings = {"JW": JordanWignerMapper, "BK": BravyiKitaevMapper, "Parity": ParityMapper } # "BKSF": BravyiKitaevSuperFastMapper
+
+def apply_Hamiltonian_to_state(state, molecule_name, basis_set, mapping_name, folder_Hamiltonians):
+    len_name = len(molecule_name) + len(basis_set) + 1
+
+    # open folder where the Hamiltonians of various encodings are stored
+    available_folders = os.listdir(folder_Hamiltonians)
+    folder_name = None
+    for folder in available_folders:
+        if folder[:len_name] == molecule_name + "_" + basis_set:
+            folder_name = folder
+    
+    # open file where the Hamiltonian of the specified encoding is stored
+    available_files = os.listdir(folder_Hamiltonians + folder_name)
+    file_name = None
+    for file in available_files:
+        if file[:2] == mapping_name[:2].lower() and file.find("grouped") == -1:
+            file_name = file
+    
+    # extract Pauli list from file
+    full_file_name = os.path.join(folder_Hamiltonians,folder_name,file_name)
+    data = np.loadtxt(full_file_name,dtype=object)
+    paulis, weights = data[::2].astype(str), data[1::2].astype(complex).real
+    
+    # Generate Hamiltonian class
+    H = Hamiltonian(weights, paulis)
+        
+    H_sparse = H.SummedOp().to_matrix()
+    state = np.array(state, dtype=complex).reshape((-1,))
+    H_dot_state = H_sparse.dot(state)
+
+    return H_dot_state
+
 
 def get_groundstate(molecule,
                     mapping=JordanWignerMapper,
