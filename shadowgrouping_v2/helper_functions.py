@@ -860,3 +860,14 @@ def uniform_random_paulis(input_file, avg_support, std_support):
         f.writelines(output_lines)
 
     #print(f"Random Pauli strings with uniformly-distributed support sizes written to {input_file}")
+
+
+def encode_setting_token(setting: np.ndarray) -> bytes:
+        """
+        Return a canonical bytes token for a setting.
+        Works for both:
+        - QWC setting       :  shape (num_qubits,), entries in {0,1,2,3}
+        - FC and kC settings:  shape (k,), entries are observable indices
+        """
+        arr = np.asarray(setting, dtype=np.int32)
+        return arr.tobytes(order="C")

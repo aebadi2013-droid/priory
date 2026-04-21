@@ -5,7 +5,7 @@ from time import time
 import numbers
 from numba import njit
 from shadowgrouping_v2.helper_functions import (
-    setting_to_str, char_to_int, hit_by_numba, hit_by_batch_numba, sample_obs_batch_from_setting_numba, prepare_settings_for_numba, setting_to_obs_form, sample_obs_batch_from_setting_batch_numba)
+    setting_to_str, char_to_int, hit_by_numba, hit_by_batch_numba, encode_setting_token, sample_obs_batch_from_setting_numba, prepare_settings_for_numba, setting_to_obs_form, sample_obs_batch_from_setting_batch_numba)
 from shadowgrouping_v2.guarantees import (get_epsilon_Chebyshev_scalar_tighter_numba, get_epsilon_Chebyshev_scalar_numba, get_epsilon_Hoeffding_scalar_tighter_numba, get_epsilon_Hoeffding_scalar_numba, get_epsilon_Bernstein_scalar, get_epsilon_Bernstein_scalar_no_restricted_validity, get_epsilon_Bernstein_scalar_tighter_no_restricted_validity, Guaranteed_accuracy)
 
 ##########################################################################################
@@ -693,8 +693,9 @@ class Measurement_scheme:
         self.eps           = epsilon
         self.scheme_params = {"eps": epsilon, "num_obs": M}
         self.N_hits        = np.zeros(M,dtype=int)
+        self.N_hits_pairs    = np.zeros((M, M), dtype=int)
         self.is_adaptive   = False # useful default to be given to any child class
-        
+        self._hit_outer_cache = {}
         return
         
     def find_setting(self):
@@ -702,6 +703,8 @@ class Measurement_scheme:
     
     def reset(self):
         self.N_hits = np.zeros_like(self.N_hits)
+        self.N_hits_pairs  = np.zeros_like(self.N_hits_pairs)
+        self._hit_outer_cache = {}
         return
     
     def get_epsilon_sys_stat(self,delta):
@@ -882,102 +885,39 @@ class Measurement_scheme:
         epsilon = sigma * (1 + np.sqrt(-2 * np.log(delta))) - (2 * B * np.log(delta) / 3)
         return epsilon
 
+    def _append_is_hit_hit_outer(self, token, setting_indices: np.ndarray) -> np.ndarray:
+        """
+        Cache the information needed to apply outer(is_hit,is_hit) for a setting, keyed by `token`.
+        Store the indices where is_hit==1, because, for 0/1 hits, outer(is_hit,is_hit) has ones on idx x idx.
+        """
+        cached = self._hit_outer_cache.get(token, None)
+        if cached is not None:
+            return cached
 
-class Shadow_Grouping(Measurement_scheme):
-    """ Grouping method based on weights obtained from classical shadows.
-        The next measurement setting p is found as follows: it is initialized as the identity operator.
-        Next, we obtain an ordering of the observables in terms of their respective weight_function.
-        For each observable o in the ordered list of observables in descending order, it checks qubit-wise commutativity (QWC).
-        If so, the qubits in p that fall in the support of o are overwritten by those in o.
-        Eventually, the list is either exhausted or p does not contain identity operators anymore.
-        The function weight_function takes in the weights,epsilon and the current number of N_hits and is supposed to return an numpy-array of length len(w).
-        Instead, weight_function can also be set to None (this is useful for instances where the function is actually never called).
-        
-        Returns p and a dictionary info holding further details on the matching procedure.
-    """
-    
-    def __init__(self,observables,weights,epsilon,weight_function):
-        super().__init__(observables,weights,epsilon)
-        self.N_hits = np.zeros_like(self.N_hits)
-        self.weight_function = weight_function
-        if self.weight_function is not None:
-            test = self.weight_function(self.w,self.eps,self.N_hits)
-            assert len(test) == len(self.w), "Weight function is supposed to return an array of shape {} (i.e. number of observables) but returned an array of shape {}".format(self.w.shape,test.shape)
-        self.is_sampling = False
-        return
-    
-    def reset(self):
-        self.N_hits = np.zeros_like(self.N_hits)
-        return
-    
-    def get_inconfidence_bound(self):
-        inconf = np.exp( -0.5*self.eps*self.eps*self.N_hits/(self.w**2) )
-        print(np.sum(inconf))
-        return np.sum(inconf)
-    
-    def get_Bernstein_bound(self):
-        if np.min(self.N_hits) == 0:
-            bound = -1
-        else:
-            bound = np.exp(-0.25*(self.eps/2/np.sum(np.abs(self.w)/np.sqrt(self.N_hits))-1)**2)
-        return bound            
-        
-    def find_setting(self,verbose=True):
-        """ Finds the next measurement setting. Can be verbosed to gain further information during the procedure. """
-        # sort observable list by respective weight
-        weights = self.weight_function(self.w,self.eps,self.N_hits)
-        order = np.argsort(weights)
-        setting = np.zeros(self.num_qubits,dtype=int)
+        idx = np.asarray(setting_indices, dtype=np.int32).ravel()
+        if idx.size:
+            # ensure canonical form (sorted unique)
+            idx = np.unique(idx)
+            idx.sort()
 
-        if verbose:
-            print("Checking list of observables.")
-        tstart = time()
-        for idx in reversed(order):
-            o = self.obs[idx]
-            if verbose:
-                print("Checking",o)
-            if hit_by(o,setting):
-                non_id = o!=0
-                # overwrite those qubits that fall in the support of o
-                setting[non_id] = o[non_id]
-                if verbose:
-                    print("p =",setting)
-                # break sequence is case all identities in setting are exhausted
-                if np.min(setting) > 0:
-                    break
-                    
-        tend = time()
-
-    
-        # update number of hits
-        is_hit = np.array([hit_by(o,setting) for o in self.obs],dtype=bool)
-        self.N_hits += is_hit
-        
-        # further info for comparisons
-        info = {}
-        info["total_weight"] = np.sum(weights[is_hit])
-        info["inconfidence_bound"] = self.get_inconfidence_bound()
-        info["Bernstein bound"] = self.get_Bernstein_bound()
-        info["run_time"] = tend - tstart
-        if verbose:
-            print("Finished assigning with total weight of",info["total_weight"])
-        return setting, info
-
-
+        self._hit_outer_cache[token] = idx
+        return idx
 
 class Priori(Measurement_scheme):
     """ First find all cliques using DomClique then select the heaviest in each round
     """
     
-    def __init__(self, observables, weights, epsilon, weight_function):
+    def __init__(self, observables, weights, epsilon, weight_function, compute_N_hits_pairs=True):
         # Convert Pauli strings to arrays FIRST
         #observablesarray = [pauli_string_to_array(o) for o in observables]
-    
         # Then pass converted observables into super().__init__()
         #super().__init__(observablesarray, weights, epsilon)
         super().__init__(observables,weights,epsilon)
         #self.settings_dict = {} 222222222222
         self.N_hits = np.zeros_like(self.N_hits)
+        self.compute_N_hits_pairs = compute_N_hits_pairs
+        if compute_N_hits_pairs:
+            self.N_hits_pairs = np.zeros((self.num_obs, self.num_obs), dtype=int)
         self.weight_function = weight_function
         self.round_num = 0
         self.rounds = []
@@ -1015,6 +955,8 @@ class Priori(Measurement_scheme):
     
     def reset(self):
         self.N_hits = np.zeros_like(self.N_hits)
+        self.N_hits_pairs  = np.zeros_like(self.N_hits_pairs)
+        self._hit_outer_cache = {}
         #self.settings_dict = {} 2222222222222
         return
 
@@ -1238,6 +1180,23 @@ class Priori(Measurement_scheme):
         # update number of hits
         is_hit = hit_by_batch_numba(self.obs , setting)
         self.N_hits += is_hit
+
+        
+        # Tokenize by the set of compatible observable indices
+        setting_indices = np.nonzero(is_hit)[0].astype(np.int32)
+        setting_indices.sort()
+        token = encode_setting_token(setting_indices)
+
+
+        if self.compute_N_hits_pairs:
+            # Cache (or retrieve) the canonical index list for this token
+            idx = self._append_is_hit_hit_outer(token, setting_indices)
+            # Apply the outer update without building an outer product
+            if idx.size:
+                self.N_hits_pairs[np.ix_(idx, idx)] += 1
+
+
+
         delta = 0.33
         self.round_num += 1    
         self.rounds.append(len(self.rounds) + 1)
@@ -1757,6 +1716,143 @@ class Posteriori(Measurement_scheme):
             print("Finished assigning with total weight of",info["total_weight"])
         return setting, info
 
+
+class Shadow_Grouping(Measurement_scheme):
+    """ Grouping method based on weights obtained from classical shadows.
+        The next measurement setting p is found as follows: it is initialized as the identity operator.
+        Next, we obtain an ordering of the observables in terms of their respective weight_function.
+        For each observable o in the ordered list of observables in descending order, it checks qubit-wise commutativity (QWC).
+        If so, the qubits in p that fall in the support of o are overwritten by those in o.
+        Eventually, the list is either exhausted or p does not contain identity operators anymore.
+        The function weight_function takes in the weights,epsilon and the current number of N_hits and is supposed to return an numpy-array of length len(w).
+        Instead, weight_function can also be set to None (this is useful for instances where the function is actually never called).
+        
+        Returns p and a dictionary info holding further details on the matching procedure.
+    """
+    
+    def __init__(self,observables,weights,epsilon,weight_function, compute_N_hits_pairs=True):
+        super().__init__(observables,weights,epsilon)
+        #self.settings_dict = {} 22222222222
+        self.N_hits = np.zeros_like(self.N_hits)
+        self.compute_N_hits_pairs = compute_N_hits_pairs
+        if compute_N_hits_pairs:
+            self.N_hits_pairs = np.zeros((self.num_obs, self.num_obs), dtype=int)
+        self.weight_function = weight_function
+        self.rounds = []
+        self.eps_values_v3 = []
+        self.inconfidence = []
+        self.provablegaurantee = []
+        self.round_num = 0
+        if self.weight_function is not None:
+            test = self.weight_function(self.w,self.eps,self.N_hits)
+            assert len(test) == len(self.w), "Weight function is supposed to return an array of shape {} (i.e. number of observables) but returned an array of shape {}".format(self.w.shape,test.shape)
+        self.is_sampling = False
+        return
+    
+    def reset(self):
+        self.N_hits = np.zeros_like(self.N_hits)
+        self.N_hits_pairs  = np.zeros_like(self.N_hits_pairs)
+        self._hit_outer_cache = {}
+        #self.settings_dict = {} 22222222222
+        return
+    
+    def get_inconfidence_bound(self):
+        inconf = np.exp( -0.5*self.eps*self.eps*self.N_hits/(self.w**2) )
+        return np.sum(inconf)
+    
+    def get_Bernstein_bound(self):
+        if np.min(self.N_hits) == 0:
+            bound = -1
+        else:
+            bound = np.exp(-0.25*(self.eps/2/np.sum(np.abs(self.w)/np.sqrt(self.N_hits))-1)**2)
+        return bound            
+        
+    def find_setting(self,verbose=False):
+        """ Finds the next measurement setting. Can be verbosed to gain further information during the procedure. """
+        # sort observable list by respective weight
+        weights = self.weight_function(self.w,self.eps,self.N_hits)
+        order = np.argsort(weights)
+        setting = np.zeros(self.num_qubits,dtype=int)
+        #print("N_hits before update:", self.N_hits)
+        #if not np.any(self.N_hits) == 0:
+            #print("now every observable is checked at least once")
+        # Get highest-weight observable
+
+        # Get highest-weight observable
+        # first_idx = order[-1]  # last one in ascending sort = highest weight
+        # first_obs = self.obs[first_idx]
+        # center_node = tuple(first_obs)  # Use tuple as dictionary key
+        # print("center node is", first_idx, "and its weight is", weights[first_idx])
+        
+        if verbose:
+            print("Checking list of observables.")
+        tstart = time()
+        for idx in reversed(order):
+            o = self.obs[idx]
+            if verbose:
+                print("Checking",o)
+            if hit_by(o,setting):
+                non_id = o!=0
+                # overwrite those qubits that fall in the support of o
+                setting[non_id] = o[non_id]
+                if verbose:
+                    print("p =",setting)
+                # break sequence is case all identities in setting are exhausted
+                if np.min(setting) > 0:
+                    break
+                    
+        tend = time()
+
+        # update number of hits
+        is_hit = np.array([hit_by(o,setting) for o in self.obs],dtype=bool)
+        self.N_hits += is_hit
+
+        # Tokenize by the set of compatible observable indices
+        setting_indices = np.nonzero(is_hit)[0].astype(np.int32)
+        setting_indices.sort()
+        token = encode_setting_token(setting_indices)
+
+
+        if self.compute_N_hits_pairs:
+            # Cache (or retrieve) the canonical index list for this token
+            idx = self._append_is_hit_hit_outer(token, setting_indices)
+            # Apply the outer update without building an outer product
+            if idx.size:
+                self.N_hits_pairs[np.ix_(idx, idx)] += 1
+
+
+        delta = 0.33
+        self.round_num += 1
+        self.rounds.append(len(self.rounds) + 1)
+        # further info for comparisons
+        info = {}
+        info["total_weight"] = np.sum(weights[is_hit])
+        info["inconfidence_bound"] = self.get_inconfidence_bound()
+        info["Bernstein bound"] = self.get_Bernstein_bound()
+        info["Provable Gaurantee"] = Guaranteed_accuracy(delta, self.N_hits, self.w, split=False)
+        info["run_time"] = tend - tstart
+        info["epsilon_Bernstein"] = self.get_epsilon_Bernstein(delta)
+        info["epsilon_Bernstein_no_restricted_validity_v2"] = self.get_epsilon_Bernstein_no_restricted_validity_v2(delta)
+        #print("epsilon_Bernstein_no_restricted_validity_v2:", info["epsilon_Bernstein_no_restricted_validity_v2"])
+        info["epsilon_Bernstein_no_restricted_validity_v3"] = self.get_epsilon_Bernstein_no_restricted_validity_v3(delta)
+        info["epsilon_Bernstein_scalar_no_restricted_validity"] = get_epsilon_Bernstein_scalar_no_restricted_validity(delta, self.N_hits, self.w, split=False)
+        self.eps_values_v3.append(info["epsilon_Bernstein_no_restricted_validity_v2"])
+        self.inconfidence.append(info["inconfidence_bound"])
+        #print("epsilon_Bernstein_scalar_no_restricted_validity:", info["epsilon_Bernstein_scalar_no_restricted_validity"])
+        #self.eps_values_v3.append(info["epsilon_Bernstein_no_restricted_validity_v3"])
+        info["epsilon_Bernstein_no_restricted_validity"] = self.get_epsilon_Bernstein_no_restricted_validity(delta)
+        if verbose:
+            print("round number", self.round_num)
+            print("epsilon_Bernstein_no_restricted_validity:", info["epsilon_Bernstein_no_restricted_validity"])
+        if verbose:
+            print("epsilon_Bernstein_no_restricted_validity_v2:", info["epsilon_Bernstein_no_restricted_validity_v2"])
+        #print("Inconfidence Bound :", info["inconfidence_bound"])
+        #print("Provable Gauarantee :", info["Provable Gaurantee"])
+        self.provablegaurantee.append(info["Provable Gaurantee"])
+        if verbose:
+            print("Finished assigning with total weight of",info["total_weight"])
+        #print("update0 info is",info)
+        return setting, info
 
 class ShadowBucket(Measurement_scheme):
     """ do shadowgrouping and store the generated settings at the same time, in next rounds, compare the epsilon of the shadow clique with the epsilon of the best clique from the cache and select the best one.

@@ -4,7 +4,7 @@ from itertools import product
 from time import time
 import numbers
 from numba import njit
-from shadowgrouping_v2.helper_functions import (setting_to_str, char_to_int, hit_by_numba, hit_by_batch_numba, sample_obs_batch_from_setting_numba, prepare_settings_for_numba, setting_to_obs_form, sample_obs_batch_from_setting_batch_numba)
+from shadowgrouping_v2.helper_functions import (setting_to_str, char_to_int, encode_setting_token, hit_by_numba, hit_by_batch_numba, sample_obs_batch_from_setting_numba, prepare_settings_for_numba, setting_to_obs_form, sample_obs_batch_from_setting_batch_numba)
 from shadowgrouping_v2.guarantees import (get_epsilon_Chebyshev_scalar_tighter_numba, get_epsilon_Chebyshev_scalar_numba, get_epsilon_Hoeffding_scalar_tighter_numba, get_epsilon_Hoeffding_scalar_numba, get_epsilon_Bernstein_scalar, get_epsilon_Bernstein_scalar_no_restricted_validity, get_epsilon_Bernstein_scalar_tighter_no_restricted_validity, Guaranteed_accuracy)
 
 ##########################################################################################
@@ -89,8 +89,9 @@ class Measurement_scheme:
         self.eps           = epsilon
         self.scheme_params = {"eps": epsilon, "num_obs": M}
         self.N_hits        = np.zeros(M,dtype=int)
+        self.N_hits_pairs    = np.zeros((M, M), dtype=int)
         self.is_adaptive   = False # useful default to be given to any child class
-        
+        self._hit_outer_cache = {}
         return
         
     def find_setting(self):
@@ -98,6 +99,8 @@ class Measurement_scheme:
     
     def reset(self):
         self.N_hits = np.zeros_like(self.N_hits)
+        self.N_hits_pairs  = np.zeros_like(self.N_hits_pairs)
+        self._hit_outer_cache = {}
         return
     
     def get_epsilon_sys_stat(self,delta):
@@ -239,6 +242,24 @@ class Measurement_scheme:
         epsilon = sigma * (1 + np.sqrt(-2 * np.log(delta))) - (2 * B * np.log(delta) / 3)
         return epsilon
 
+    def _append_is_hit_hit_outer(self, token, setting_indices: np.ndarray) -> np.ndarray:
+        """
+        Cache the information needed to apply outer(is_hit,is_hit) for a setting, keyed by `token`.
+        Store the indices where is_hit==1, because, for 0/1 hits, outer(is_hit,is_hit) has ones on idx x idx.
+        """
+        cached = self._hit_outer_cache.get(token, None)
+        if cached is not None:
+            return cached
+
+        idx = np.asarray(setting_indices, dtype=np.int32).ravel()
+        if idx.size:
+            # ensure canonical form (sorted unique)
+            idx = np.unique(idx)
+            idx.sort()
+
+        self._hit_outer_cache[token] = idx
+        return idx
+
 
         
 class Shadow_Grouping(Measurement_scheme):
@@ -254,10 +275,13 @@ class Shadow_Grouping(Measurement_scheme):
         Returns p and a dictionary info holding further details on the matching procedure.
     """
     
-    def __init__(self,observables,weights,epsilon,weight_function):
+    def __init__(self,observables,weights,epsilon,weight_function, compute_N_hits_pairs=True):
         super().__init__(observables,weights,epsilon)
         #self.settings_dict = {} 22222222222
         self.N_hits = np.zeros_like(self.N_hits)
+        self.compute_N_hits_pairs = compute_N_hits_pairs
+        if compute_N_hits_pairs:
+            self.N_hits_pairs = np.zeros((self.num_obs, self.num_obs), dtype=int)
         self.weight_function = weight_function
         self.rounds = []
         self.eps_values_v3 = []
@@ -272,6 +296,8 @@ class Shadow_Grouping(Measurement_scheme):
     
     def reset(self):
         self.N_hits = np.zeros_like(self.N_hits)
+        self.N_hits_pairs  = np.zeros_like(self.N_hits_pairs)
+        self._hit_outer_cache = {}
         #self.settings_dict = {} 22222222222
         return
     
@@ -325,6 +351,21 @@ class Shadow_Grouping(Measurement_scheme):
         # update number of hits
         is_hit = np.array([hit_by(o,setting) for o in self.obs],dtype=bool)
         self.N_hits += is_hit
+
+        # Tokenize by the set of compatible observable indices
+        setting_indices = np.nonzero(is_hit)[0].astype(np.int32)
+        setting_indices.sort()
+        token = encode_setting_token(setting_indices)
+
+
+        if self.compute_N_hits_pairs:
+            # Cache (or retrieve) the canonical index list for this token
+            idx = self._append_is_hit_hit_outer(token, setting_indices)
+            # Apply the outer update without building an outer product
+            if idx.size:
+                self.N_hits_pairs[np.ix_(idx, idx)] += 1
+
+
         delta = 0.33
         self.round_num += 1
         self.rounds.append(len(self.rounds) + 1)
@@ -939,6 +980,6 @@ class DomClique(Measurement_scheme):
         assert np.allclose(setting[filtered],self.double_check[filtered]), "The clique {} does not allow for a qubit-wise commutativity-compatible measurement setting.".format(self.MaxCliques)
         return setting
 
-    
+
 
 
