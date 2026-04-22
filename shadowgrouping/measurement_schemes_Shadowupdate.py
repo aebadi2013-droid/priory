@@ -6,7 +6,12 @@ import numbers
 from numba import njit
 from shadowgrouping_v2.helper_functions import (
     setting_to_str, char_to_int, hit_by_numba, hit_by_batch_numba, encode_setting_token, sample_obs_batch_from_setting_numba, prepare_settings_for_numba, setting_to_obs_form, sample_obs_batch_from_setting_batch_numba)
-from shadowgrouping_v2.guarantees import (get_epsilon_Chebyshev_scalar_tighter_numba, get_epsilon_Chebyshev_scalar_numba, get_epsilon_Hoeffding_scalar_tighter_numba, get_epsilon_Hoeffding_scalar_numba, get_epsilon_Bernstein_scalar, get_epsilon_Bernstein_scalar_no_restricted_validity, get_epsilon_Bernstein_scalar_tighter_no_restricted_validity, Guaranteed_accuracy)
+from shadowgrouping_v2.guarantees import (get_epsilon_Chebyshev_scalar_tighter_numba, 
+get_epsilon_Chebyshev_scalar_numba, get_epsilon_Hoeffding_scalar_tighter_numba, 
+get_epsilon_Hoeffding_scalar_numba, get_epsilon_Bernstein_scalar, 
+get_epsilon_Bernstein_scalar_no_restricted_validity, get_epsilon_Bernstein_scalar_tighter_no_restricted_validity, 
+Guaranteed_accuracy)
+from guarantees.guarantees import (get_epsilon_Chebyshev_scalar_tighter_numba, get_epsilon_Chebyshev_scalar_tightest_numba)
 
 ##########################################################################################
 ### Helper functions #####################################################################
@@ -907,7 +912,7 @@ class Priori(Measurement_scheme):
     """ First find all cliques using DomClique then select the heaviest in each round
     """
     
-    def __init__(self, observables, weights, epsilon, weight_function, compute_N_hits_pairs=True):
+    def __init__(self, observables, weights, epsilon, weight_function, cov_real, compute_N_hits_pairs=True):
         # Convert Pauli strings to arrays FIRST
         #observablesarray = [pauli_string_to_array(o) for o in observables]
         # Then pass converted observables into super().__init__()
@@ -915,6 +920,7 @@ class Priori(Measurement_scheme):
         super().__init__(observables,weights,epsilon)
         #self.settings_dict = {} 222222222222
         self.N_hits = np.zeros_like(self.N_hits)
+        self.cov_real = cov_real
         self.compute_N_hits_pairs = compute_N_hits_pairs
         if compute_N_hits_pairs:
             self.N_hits_pairs = np.zeros((self.num_obs, self.num_obs), dtype=int)
@@ -922,6 +928,8 @@ class Priori(Measurement_scheme):
         self.round_num = 0
         self.rounds = []
         self.eps_values_v3 = []
+        self.eps_chebyshev_tighter = []
+        self.eps_chebyshev_tightest = []
         self.provablegaurantee = []
         self.inconfindence = []
         self.shadow_was_best_count = 0
@@ -1225,6 +1233,10 @@ class Priori(Measurement_scheme):
         info["epsilon_Bernstein_no_restricted_validity_v2"] = self.get_epsilon_Bernstein_no_restricted_validity_v2(delta, split=True)
         if verbose:
             print("epsilon_Bernstein_no_restricted_validity_v2:", info["epsilon_Bernstein_no_restricted_validity_v2"])
+        info["epsilon_chebyshev_tighter"] = get_epsilon_Chebyshev_scalar_tighter_numba(delta, self.N_hits, self.N_hits_pairs, self.w)
+        self.eps_chebyshev_tighter.append(info["epsilon_chebyshev_tighter"])
+        info["epsilon_chebyshev_tightest"] = get_epsilon_Chebyshev_scalar_tightest_numba(delta, self.N_hits, self.N_hits_pairs, self.w, self.cov_real)
+        self.eps_chebyshev_tightest.append(info["epsilon_chebyshev_tightest"])
         #print("Inconfidence Bound :", info["inconfidence_bound"])
         #print("Provable Gauarantee :", info["Provable Gaurantee"])
         self.provablegaurantee.append(info["Provable Gaurantee"])
@@ -1730,16 +1742,19 @@ class Shadow_Grouping(Measurement_scheme):
         Returns p and a dictionary info holding further details on the matching procedure.
     """
     
-    def __init__(self,observables,weights,epsilon,weight_function, compute_N_hits_pairs=True):
+    def __init__(self,observables,weights,epsilon,weight_function, cov_real, compute_N_hits_pairs=True):
         super().__init__(observables,weights,epsilon)
         #self.settings_dict = {} 22222222222
         self.N_hits = np.zeros_like(self.N_hits)
+        self.cov_real = cov_real
         self.compute_N_hits_pairs = compute_N_hits_pairs
         if compute_N_hits_pairs:
             self.N_hits_pairs = np.zeros((self.num_obs, self.num_obs), dtype=int)
         self.weight_function = weight_function
         self.rounds = []
         self.eps_values_v3 = []
+        self.eps_chebyshev_tighter = []
+        self.eps_chebyshev_tightest = []
         self.inconfidence = []
         self.provablegaurantee = []
         self.round_num = 0
@@ -1849,6 +1864,10 @@ class Shadow_Grouping(Measurement_scheme):
         #print("Inconfidence Bound :", info["inconfidence_bound"])
         #print("Provable Gauarantee :", info["Provable Gaurantee"])
         self.provablegaurantee.append(info["Provable Gaurantee"])
+        info["epsilon_chebyshev_tighter"] = get_epsilon_Chebyshev_scalar_tighter_numba(delta, self.N_hits, self.N_hits_pairs, self.w)
+        self.eps_chebyshev_tighter.append(info["epsilon_chebyshev_tighter"])
+        info["epsilon_chebyshev_tightest"] = get_epsilon_Chebyshev_scalar_tightest_numba(delta, self.N_hits, self.N_hits_pairs, self.w, self.cov_real)
+        self.eps_chebyshev_tightest.append(info["epsilon_chebyshev_tightest"])
         if verbose:
             print("Finished assigning with total weight of",info["total_weight"])
         #print("update0 info is",info)
