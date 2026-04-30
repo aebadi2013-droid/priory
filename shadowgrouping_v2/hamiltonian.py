@@ -43,9 +43,15 @@ def apply_Hamiltonian_to_state(state, molecule_name, basis_set, mapping_name, fo
     # Generate Hamiltonian class
     H = Hamiltonian(weights, paulis)
         
-    H_sparse = H.SummedOp().to_matrix()
     state = np.array(state, dtype=complex).reshape((-1,))
+    H_sparse = H.SummedOp().to_spmatrix()
     H_dot_state = H_sparse.dot(state)
+
+    # use sparse matrix representation to apply Hamiltonian to state
+    """H_dot_state = np.zeros_like(state, dtype=complex)
+    for w, p in zip(weights, paulis):
+        op = PauliOp(Pauli(p))
+        H_dot_state += w * op.to_spmatrix().dot(state)"""
 
     return H_dot_state
 
@@ -118,7 +124,7 @@ class Hamiltonian():
             paulis.append(LDN_factor * coeff_P * PauliOp(Pauli(P)))
         return SummedOp(paulis)
 
-    def ground(self, sparse=False):
+    def ground(self, sparse=True):
         if not sparse:
             mat = self.SummedOp().to_matrix()
             evalues, evectors = np.linalg.eigh(mat)
@@ -130,6 +136,25 @@ class Hamiltonian():
         ground_energy = evalues[index]
         ground_state = evectors[:,index]
         return ground_energy, ground_state
+    
+    #for big matrices, the dense diagonalization is not possible anymore. In this case, we can use the sparse matrix representation to compute the smallest eigenvalue and its corresponding eigenvector.
+    """def ground(self, sparse=False):
+        if sparse:
+            from scipy.sparse.linalg import eigsh
+            
+            # Build sparse matrix instead of dense
+            mat = self.SummedOp().to_spmatrix()
+            
+            # Compute smallest eigenvalue (ground state)
+            eigval, eigvec = eigsh(mat, k=1, which='SA')
+            
+            return eigval[0], eigvec[:, 0]
+
+        else:
+            # Only use this for very small systems
+            mat = self.SummedOp().to_matrix()
+            evalues, evectors = np.linalg.eigh(mat)
+            return evalues[0], evectors[:, 0]"""
 
 def load_pauli_list(folder_hamiltonian,molecule_name,basis_name,encoding,verbose=False,sparse=False,diagonalize=True):
     """ Loads the Pauli operators and the corresponding ground-state energy from the files of
@@ -191,7 +216,9 @@ def load_pauli_list(folder_hamiltonian,molecule_name,basis_name,encoding,verbose
     if diagonalize:
         # use Pauli list to create Hamiltonian and diagonalize it afterwards to obtain ground-state
         H = Hamiltonian(weights,paulis)
-        E_numerics, state = H.ground(sparse=sparse)
+        #E_numerics, state = H.ground(sparse=sparse)
+        #for small systems, the dense diagonalization is still possible. For larger systems, we can use the sparse matrix representation to compute the smallest eigenvalue and its corresponding eigenvector.
+        E_numerics, state = H.ground(sparse=True)
         print("Recorded:",E_GS)
         print("Calculated:",E_numerics)
         if abs(E_GS-E_numerics) >= 1e-6:

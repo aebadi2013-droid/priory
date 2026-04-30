@@ -30,11 +30,11 @@ def calculate_support_statistics_and_generate_uniform(input_file, output_file):
             print(f"Skipping invalid pair at lines {i + 1} and {i + 2}: {e}")
 
     # Calculate average and standard deviation of support sizes
-    #avg_support = np.mean(support_sizes)
-    #std_support = np.std(support_sizes)
+    avg_support = np.mean(support_sizes)
+    std_support = np.std(support_sizes)
 
-    avg_support = 5.8
-    std_support = 1
+    #avg_support = 5.8
+    #std_support = 1
 
     print(f"Average support size: {avg_support}, Standard deviation: {std_support}")
 
@@ -59,8 +59,8 @@ def calculate_support_statistics_and_generate_uniform(input_file, output_file):
     print(f"Random Pauli strings with uniformly-distributed support sizes written to {output_file}")
 
 
-input_file = "d:/priori/Hamiltonians_v2/BeH2_sto3g_14qubits/jw.txt"
-output_file = "d:/priori/Hamiltonians_v2/BeH2_sto3g_14qubits/jw_uniformrandompaulis_M5.8D1.0.txt"
+input_file = "d:/priori/Hamiltonians_v2/H2_6-31g_8qubits/jw.txt"
+output_file = "d:/priori/Hamiltonians_v2/H2_6-31g_8qubits/jw_uniformrandompaulis_M5.8D1.0.txt"
 calculate_support_statistics_and_generate_uniform(input_file, output_file)
 
 
@@ -121,8 +121,8 @@ def calculate_support_statistics_and_generate_random(input_file, output_file):
     print(f"Random Pauli strings with Gaussian-distributed support sizes written to {output_file}")
 
 
-input_file = "d:/priori/Hamiltonians_v2/BeH2_sto3g_14qubits/jw.txt"
-output_file = "d:/priori/Hamiltonians_v2/BeH2_sto3g_14qubits/jw_gaussianrandompaulis_M3.0D1.2.txt"
+input_file = "d:/priori/Hamiltonians_v2/H2_6-31g_8qubits/jw.txt"
+output_file = "d:/priori/Hamiltonians_v2/H2_6-31g_8qubits/jw_gaussianrandompaulis_M5.8D4.0.txt"
 calculate_support_statistics_and_generate_random(input_file, output_file)
 
 def plot_weight_distribution(hamiltonian_terms, weights , title="Gaussian Bell Curve of Weights"):

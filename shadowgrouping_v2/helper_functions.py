@@ -789,7 +789,7 @@ def gaussian_random_paulis(input_file, avg_support, std_support):
     for i in range(len(pauli_strings)):
         random_support_size = int(np.random.normal(avg_support, std_support))
         #random_support_size = max(1, random_support_size)  # Ensure at least one non-identity term
-        random_support_size = max(1, min(random_support_size, 14))  # Clamp between 1 and 14
+        random_support_size = max(1, min(random_support_size, 8))  # Clamp between 1 and 8
 
         # Generate a random Pauli string with the given support size
         random_pauli = list('I' * len(pauli_strings[i]))
@@ -845,7 +845,7 @@ def uniform_random_paulis(input_file, avg_support, std_support):
     output_lines = []
     for i in range(len(pauli_strings)):
         random_support_size = np.random.randint(max(1, int(avg_support - std_support)), int(avg_support + std_support) + 1)
-        random_support_size = max(1, min(random_support_size, 14))  # Clamp between 1 and 14
+        random_support_size = max(1, min(random_support_size, 8))  # Clamp between 1 and 8
         # Generate a random Pauli string with the given support size
         random_pauli = list('I' * len(pauli_strings[i]))
         non_identity_indices = np.random.choice(len(random_pauli), random_support_size, replace=False)
