@@ -91,13 +91,13 @@ class Sign_estimator():
         self.outcomes     = []
         self.num_settings = 0
         self.num_outcomes = 0
-        #self.settings_dict = {}
+        self.settings_dict = {}
     
     def reset(self):
         self.setting_inds = []
         self.outcomes     = []
         self.num_settings, self.num_outcomes = 0, 0
-        self.measurement_scheme.settings_dict = {}
+        self.settings_dict = {}
         self.measurement_scheme.reset()
         
     def clear_outcomes(self):
@@ -162,8 +162,8 @@ class Energy_estimator():
         self.state        = state
         self.offset       = offset
         # convenience counters to keep track of measurements settings and respective outcomes
-        #self.measurement_scheme.settings_dict = {}
-        #self.settings_buffer = {}
+        self.settings_dict = {}
+        self.settings_buffer = {}
         self.raw_samples_dict = {}
         self.obs_samples_dict_list = [{} for _ in range(self.measurement_scheme.num_obs)]
         self.num_settings = 0
@@ -181,8 +181,8 @@ class Energy_estimator():
             self.order = None
         
     def reset(self):
-        self.measurement_scheme.settings_dict = {}
-        self.measurement_scheme.settings_buffer = {}
+        self.settings_dict = {}
+        self.settings_buffer = {}
         self.samples_dict = {}
         self.obs_samples_dict_list = [{} for _ in range(self.measurement_scheme.num_obs)]
         self.num_settings, self.num_outcomes = 0, 0
@@ -197,10 +197,9 @@ class Energy_estimator():
         return
     
     def clear_outcomes(self):
-        self.measurement_scheme.settings_buffer = self.measurement_scheme.settings_dict.copy() #1111111
+        self.settings_buffer = self.settings_dict.copy() #1111111
         #self.measurement_scheme.settings_buffer = self.settings_buffer
-        #self.measurement_scheme.samples_dict = {}
-        self.raw_samples_dict = {}
+        self.samples_dict = {}
         self.running_N = np.zeros(self.measurement_scheme.num_obs, dtype=int)
         self.running_avgs = np.zeros((self.N_reps_exp, self.measurement_scheme.num_obs))
         self.obs_samples_dict_list = [{} for _ in range(self.measurement_scheme.num_obs)]
@@ -224,8 +223,8 @@ class Energy_estimator():
         
     def load_saved_scheme(self, settings_for_Nrounds, num_diff_settings_for_Nrounds=None):
         self.num_settings = len(settings_for_Nrounds)
-        settings_to_dict(settings_for_Nrounds, self.measurement_scheme.settings_dict, self.measurement_scheme.settings_buffer) #1111111
-        distinct_settings, distinct_settings_reps = zip(*self.measurement_scheme.settings_dict.items()) #1111111
+        settings_to_dict(settings_for_Nrounds, self.settings_dict, self.settings_buffer) #1111111
+        distinct_settings, distinct_settings_reps = zip(*self.settings_dict.items()) #1111111
         converted_distinct_settings = np.array([setting_to_obs_form(s) for s in distinct_settings])
         distinct_settings_reps = np.array(distinct_settings_reps)
         compatibility_matrix = sample_obs_batch_from_setting_batch_numba(self.measurement_scheme.obs, converted_distinct_settings)
@@ -256,15 +255,14 @@ class Energy_estimator():
         settings = []
         for i in range(num_steps):
             p, _ = self.measurement_scheme.find_setting()
-            settings.append(np.asarray(p, dtype=np.int32))
-        #settings = np.array(settings)
-        #order_attr = getattr(self.measurement_scheme, "order", None)
+            settings.append(p)
+        settings = np.array(settings)
         self.num_settings += num_steps
         if self.is_adaptive:
-            settings_to_dict(settings, self.measurement_scheme.settings_dict, self.measurement_scheme.settings_buffer, 
+            settings_to_dict(settings, self.settings_dict, self.settings_buffer, 
                              self.is_adaptive, self.order)
         else:
-            settings_to_dict(settings, self.measurement_scheme.settings_dict, self.measurement_scheme.settings_buffer)
+            settings_to_dict(settings, self.settings_dict, self.settings_buffer)
         return
     
     def measure_and_get_running_avgs(self,p_GDN=None,p_array_LDN=None):
@@ -277,7 +275,7 @@ class Energy_estimator():
         # Preallocate accumulators for all repetitions and observables
         totals = np.zeros((self.N_reps_exp, self.measurement_scheme.num_obs))
         counts = np.zeros((self.N_reps_exp, self.measurement_scheme.num_obs), dtype=int)
-        for setting, reps in self.measurement_scheme.settings_buffer.items():
+        for setting, reps in self.settings_buffer.items():
             reps_eff = self.N_reps_exp * reps
             samples = self.state.sample(meas_basis=setting, nshots=reps_eff)
             # Apply local depolarizing noise model if p_array_LDN is provided
@@ -333,7 +331,7 @@ class Energy_estimator():
             return
         if self.is_adaptive:
             outcomes = np.zeros((num_meas, self.measurement_scheme.num_qubits), dtype=int)    
-        for setting, reps in self.measurement_scheme.settings_buffer.items():
+        for setting, reps in self.settings_buffer.items():
             reps_eff = self.N_reps_exp * reps
             samples = self.state.sample(meas_basis=setting, nshots=reps_eff)
             # Apply local depolarizing noise model if p_array_LDN is provided
@@ -413,7 +411,7 @@ class Energy_estimator():
     
         futures = []
         with ProcessPoolExecutor() as executor:
-            for setting, reps in self.measurement_scheme.settings_buffer.items():
+            for setting, reps in self.settings_buffer.items():
                 futures.append(executor.submit(
                     process_setting,
                     setting, reps,

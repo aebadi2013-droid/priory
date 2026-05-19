@@ -5,13 +5,14 @@ from time import time
 import numbers
 from numba import njit
 from shadowgrouping_v2.helper_functions import (
-    setting_to_str, char_to_int, hit_by_numba, hit_by_batch_numba, encode_setting_token, sample_obs_batch_from_setting_numba, prepare_settings_for_numba, setting_to_obs_form, sample_obs_batch_from_setting_batch_numba)
+    setting_to_str, char_to_int, hit_by_numba, hit_by_batch_numba, encode_setting_token, decode_setting_token, sample_obs_batch_from_setting_numba, prepare_settings_for_numba, setting_to_obs_form, sample_obs_batch_from_setting_batch_numba)
 from shadowgrouping_v2.guarantees import (get_epsilon_Chebyshev_scalar_tighter_numba, 
 get_epsilon_Chebyshev_scalar_numba, get_epsilon_Hoeffding_scalar_tighter_numba, 
 get_epsilon_Hoeffding_scalar_numba, get_epsilon_Bernstein_scalar, 
 get_epsilon_Bernstein_scalar_no_restricted_validity, get_epsilon_Bernstein_scalar_tighter_no_restricted_validity, 
 Guaranteed_accuracy)
 from guarantees.guarantees import (get_epsilon_Chebyshev_scalar_tighter_numba, get_epsilon_Chebyshev_scalar_tightest_numba)
+from shadowgrouping_v2.allocation_mixin import _AllocationMixin
 
 ##########################################################################################
 ### Helper functions #####################################################################
@@ -701,6 +702,9 @@ class Measurement_scheme:
         self.N_hits_pairs    = np.zeros((M, M), dtype=int)
         self.is_adaptive   = False # useful default to be given to any child class
         self._hit_outer_cache = {}
+        self.settings_dict = {}
+        self.settings_buffer = {}
+        self.is_overlapping = True
         return
         
     def find_setting(self):
@@ -710,6 +714,8 @@ class Measurement_scheme:
         self.N_hits = np.zeros_like(self.N_hits)
         self.N_hits_pairs  = np.zeros_like(self.N_hits_pairs)
         self._hit_outer_cache = {}
+        self.settings_dict = {}
+        self.settings_buffer = {}
         return
     
     def get_epsilon_sys_stat(self,delta):
@@ -770,7 +776,7 @@ class Measurement_scheme:
             Else, epsilon = 2*|weights/sqrt(N_hits)| * (1 + 2sqrt(log(1/delta)))
         """
         if np.min(self.N_hits) == 0:
-            return np.infty
+            return np.inf
         w_abs  = np.abs(self.w)
         w_abs /= np.sqrt(self.N_hits)
         norm   = np.sum(w_abs)
@@ -788,7 +794,7 @@ class Measurement_scheme:
             Else, epsilon = sigma * [1 + sqrt(2 log(1/delta)) ] + 2B/3 * log(1/delta)
         """
         if np.min(self.N_hits) == 0:
-            return np.infty
+            return np.inf
         w_abs  = np.abs(self.w)
         w_abs /= np.sqrt(self.N_hits)
         sigma  = 2 * np.sum(w_abs) # Eq. (25), Supp. Inf. of published version of ShadowGrouping paper
@@ -879,7 +885,7 @@ class Measurement_scheme:
         mask = self.N_hits > 0
     
         if not np.any(mask):  # all N_hits are zero
-            return np.infty
+            return np.inf
     
         w_abs = np.abs(self.w[mask]) / np.sqrt(self.N_hits[mask])
         sigma = 2 * np.sum(w_abs)  # Eq. (25)
@@ -918,7 +924,7 @@ class Priori(Measurement_scheme):
         # Then pass converted observables into super().__init__()
         #super().__init__(observablesarray, weights, epsilon)
         super().__init__(observables,weights,epsilon)
-        #self.settings_dict = {} 222222222222
+        #self.settings_dict = {} #222222
         self.N_hits = np.zeros_like(self.N_hits)
         self.cov_real = cov_real
         self.compute_N_hits_pairs = compute_N_hits_pairs
@@ -965,7 +971,8 @@ class Priori(Measurement_scheme):
         self.N_hits = np.zeros_like(self.N_hits)
         self.N_hits_pairs  = np.zeros_like(self.N_hits_pairs)
         self._hit_outer_cache = {}
-        #self.settings_dict = {} 2222222222222
+        self.settings_dict = {} #2222222222222
+        self.settings_buffer = {}
         return
 
     # Equation 27,28 and 29
@@ -1252,7 +1259,7 @@ class Posteriori(Measurement_scheme):
     
     def __init__(self,observables,weights,epsilon,weight_function):
         super().__init__(observables,weights,epsilon)
-        #self.settings_dict = {} 2222222222222
+        #self.settings_dict = {} #2222222222222
         self.N_hits = np.zeros_like(self.N_hits)
         self.weight_function = weight_function
         self.shadow_was_best_count = 0
@@ -1276,7 +1283,8 @@ class Posteriori(Measurement_scheme):
     
     def reset(self):
         self.N_hits = np.zeros_like(self.N_hits)
-        #self.settings_dict = {} 22222222222
+        self.settings_dict = {} #22222222222
+        self.settings_buffer = {}
         return
     
     def get_inconfidence_bound(self):
@@ -1744,7 +1752,7 @@ class Shadow_Grouping(Measurement_scheme):
     
     def __init__(self,observables,weights,epsilon,weight_function, cov_real, compute_N_hits_pairs=True):
         super().__init__(observables,weights,epsilon)
-        #self.settings_dict = {} 22222222222
+        #self.settings_dict = {}
         self.N_hits = np.zeros_like(self.N_hits)
         self.cov_real = cov_real
         self.compute_N_hits_pairs = compute_N_hits_pairs
@@ -1758,6 +1766,7 @@ class Shadow_Grouping(Measurement_scheme):
         self.inconfidence = []
         self.provablegaurantee = []
         self.round_num = 0
+        self.commutativity_type = 'qwc'
         if self.weight_function is not None:
             test = self.weight_function(self.w,self.eps,self.N_hits)
             assert len(test) == len(self.w), "Weight function is supposed to return an array of shape {} (i.e. number of observables) but returned an array of shape {}".format(self.w.shape,test.shape)
@@ -1768,7 +1777,8 @@ class Shadow_Grouping(Measurement_scheme):
         self.N_hits = np.zeros_like(self.N_hits)
         self.N_hits_pairs  = np.zeros_like(self.N_hits_pairs)
         self._hit_outer_cache = {}
-        #self.settings_dict = {} 22222222222
+        self.settings_dict = {} #22222222222
+        self.settings_buffer = {}
         return
     
     def get_inconfidence_bound(self):
@@ -1871,7 +1881,7 @@ class Shadow_Grouping(Measurement_scheme):
         if verbose:
             print("Finished assigning with total weight of",info["total_weight"])
         #print("update0 info is",info)
-        return setting, info
+        return setting_indices, info
 
 class ShadowBucket(Measurement_scheme):
     """ do shadowgrouping and store the generated settings at the same time, in next rounds, compare the epsilon of the shadow clique with the epsilon of the best clique from the cache and select the best one.
@@ -1907,7 +1917,8 @@ class ShadowBucket(Measurement_scheme):
     
     def reset(self):
         self.N_hits = np.zeros_like(self.N_hits)
-        #self.settings_dict = {} 2222222222222
+        self.settings_dict = {} #2222222222222
+        self.settings_buffer = {} #2222222222222
         return
 
     # Equation 27,28 and 29
@@ -2182,7 +2193,7 @@ class Brute_force_matching(Shadow_Grouping):
     
     def find_setting(self,verbose=False):
         """ Finds the next measurement setting. Can be verbosed to gain further information during the procedure. """
-        best_setting, best_weight = [], np.infty
+        best_setting, best_weight = [], np.inf
         if verbose:
             print("Brute-force searching all measurement settings")
         tstart = time()
@@ -2739,5 +2750,548 @@ class DomClique(Measurement_scheme):
         return setting
 
     
+
+class Best_scheme_given_pool(_AllocationMixin, Measurement_scheme):
+    """
+    Group-pool-agnostic measurement scheme for energy estimation.
+
+    This class does not generate groups internally. Instead, it imports a pool
+    of measurement settings from the `settings_dict` of another measurement
+    scheme, interprets each key as a token encoding the sorted indices of Pauli
+    observables measured by that setting, and then reallocates the measurement
+    budget over that imported pool.
+
+    The budget allocation is inherited from `_AllocationMixin`.
+
+    Source-pool convention
+    ----------------------
+    The source scheme must store settings using
+
+        token = encode_setting_token(setting_indices)
+
+    where `setting_indices` is a sorted array of observable indices measured
+    by that setting. This convention is assumed for QWC, FC, and kC alike.
+
+    For k-commutativity, the source scheme must also provide
+
+        source_scheme.fc_blocks_dict
+
+    mapping each setting token to its kC block partition metadata. This metadata
+    is copied into the new scheme.
+
+    Important
+    ---------
+    Unlike `Sorted_Insertion_OGM` and `Greedy_Clique_Cover`, this class does not
+    perform coverage repair by adding singleton groups. The imported pool is
+    treated as fixed. If some positive-weight observable is not covered by the
+    imported pool and truncation is not enabled, an error is raised.
+
+    Consistency requirements
+    ------------------------
+    The source scheme and this scheme must agree on:
+
+      - observable array and ordering;
+      - number of observables;
+      - number of qubits;
+      - commutativity_type;
+      - is_overlapping;
+      - k, if commutativity_type == "kc".
+
+    Allocation options such as total_rounds, allocation_objective,
+    rounding_strategy, and md_gap_tol_rel do not need to match the source scheme.
+
+    Allocation objectives
+    ---------------------
+    Budget allocation is inherited from `_AllocationMixin`, which supports:
+
+      - allocation_objective = "variance":
+
+            sum_j |alpha_j|^2 / N_j
+
+      - allocation_objective = "bernstein_l1":
+
+            sum_j |alpha_j| / sqrt(N_j)
+    """
+
+    def __init__(self,observables,weights,source_scheme,epsilon: float = 0.1,
+                 total_rounds: int = 0,is_overlapping: bool = True,
+                 commutativity_type: str = "qwc", *,
+                 informed_allocation: bool = True,
+                 allocation_objective: str = "bernstein_l1",
+                 attempt_truncation: bool = False,
+                 rounding_strategy: str = "largest_fraction",
+                 md_gap_tol_rel: float = 1e-4,
+                 prior_counts=None,
+                 k: int | None = None):
+        
+        #super().__init__(observables, weights, epsilon, save_scheme=False)
+        super().__init__(observables, weights, epsilon)
+        self.is_overlapping = bool(is_overlapping)
+        self.is_sampling = False
+
+        self.commutativity_type = str(commutativity_type).lower()
+        if self.commutativity_type not in ("qwc", "fc", "kc"):
+            raise ValueError("commutativity_type must be 'qwc', 'fc', or 'kc'.")
+
+        self.total_rounds = int(total_rounds)
+        if self.total_rounds < 0:
+            raise ValueError("total_rounds must be >= 0.")
+
+        # ------------------------------------------------------------------
+        # kC metadata
+        # ------------------------------------------------------------------
+
+        if self.commutativity_type == "kc":
+            if k is None:
+                if not hasattr(source_scheme, "k"):
+                    raise ValueError(
+                        "commutativity_type='kc' requires either k to be provided "
+                        "or source_scheme to have a 'k' attribute."
+                    )
+                self.k = int(source_scheme.k)
+            else:
+                self.k = int(k)
+
+            if not (1 <= self.k <= self.num_qubits):
+                raise ValueError(
+                    f"k must satisfy 1 <= k <= num_qubits={self.num_qubits}. "
+                    f"Got k={self.k}."
+                )
+
+            self.fc_blocks_dict = {}
+
+        else:
+            if k is not None:
+                raise ValueError(
+                    "The argument k should only be provided when "
+                    "commutativity_type='kc'."
+                )
+
+        # ------------------------------------------------------------------
+        # Allocation options used by _AllocationMixin
+        # ------------------------------------------------------------------
+
+        self.informed_allocation = bool(informed_allocation)
+
+        self.allocation_objective = str(allocation_objective).lower()
+        if self.allocation_objective not in ("variance", "bernstein_l1"):
+            raise ValueError(
+                "allocation_objective must be either 'variance' or 'bernstein_l1'. "
+                f"Got {allocation_objective!r}."
+            )
+
+        self.attempt_truncation = bool(attempt_truncation)
+
+        self.rounding_strategy = str(rounding_strategy).lower()
+        if self.rounding_strategy not in ("largest_fraction", "marginal"):
+            raise ValueError(
+                "rounding_strategy must be either 'largest_fraction' or 'marginal'. "
+                f"Got {rounding_strategy!r}."
+            )
+
+        self.md_gap_tol_rel = float(md_gap_tol_rel)
+        if self.md_gap_tol_rel <= 0.0:
+            raise ValueError("md_gap_tol_rel must be positive.")
+
+        if self.attempt_truncation and not self.informed_allocation:
+            raise ValueError(
+                "attempt_truncation=True requires informed_allocation=True, "
+                "because truncation is defined through the informed allocation objective."
+            )
+
+        if self.attempt_truncation and not self.is_overlapping:
+            raise ValueError(
+                "attempt_truncation=True is currently implemented only for "
+                "overlapping allocation, i.e. is_overlapping=True."
+            )
+
+        # Optional prior samples per Pauli string.
+        if prior_counts is None:
+            self.prior_counts = np.zeros(self.num_obs, dtype=np.int64)
+        else:
+            prior_counts_arr = np.asarray(prior_counts)
+
+            if prior_counts_arr.shape != (self.num_obs,):
+                prior_counts_arr = prior_counts_arr.reshape(-1)
+
+            if prior_counts_arr.shape != (self.num_obs,):
+                raise ValueError(
+                    f"prior_counts must have shape ({self.num_obs},), "
+                    f"got {prior_counts_arr.shape}."
+                )
+
+            if not np.all(np.isfinite(prior_counts_arr)):
+                raise ValueError("prior_counts must contain only finite values.")
+
+            if np.any(prior_counts_arr < 0):
+                raise ValueError("prior_counts must be nonnegative.")
+
+            if not np.allclose(prior_counts_arr, np.round(prior_counts_arr)):
+                raise ValueError("prior_counts must contain integer sample counts.")
+
+            self.prior_counts = np.round(prior_counts_arr).astype(np.int64, copy=True)
+
+        # Diagnostics populated by _AllocationMixin.
+        self.allocation_info = {
+            "attempted": False,
+            "mode": None}
+
+        self.truncation_info = {
+            "attempted": False,
+            "selected": False}
+
+        self.imported_pool_info = {
+            "source_class": source_scheme.__class__.__name__,
+            "num_imported_settings_raw": 0,
+            "num_imported_settings_unique": 0,
+            "num_covered_observables": 0,
+            "num_uncovered_observables": 0,
+            "num_uncovered_positive_weight_observables": 0,
+        }
+
+        self.cliques_pool: list[np.ndarray] = []
+        self.source_scheme = source_scheme
+
+        self.get_groups(source_scheme)
+
+        self.allocate_budget()
+
+    # ------------------------------------------------------------------
+    # Reset
+    # ------------------------------------------------------------------
+
+    def reset(self, updated_total_rounds=None, clear_prior_counts=False):
+        """
+        Reset the newly allocated measurement scheme and re-run budget allocation
+        over the already imported group pool.
+
+        This does not re-import groups from the source scheme. To refresh the
+        pool, call `get_groups(source_scheme)` explicitly before reallocating.
+        """
+        if updated_total_rounds is not None:
+            self.total_rounds = int(updated_total_rounds)
+            if self.total_rounds < 0:
+                raise ValueError("total_rounds must be >= 0.")
+
+        if clear_prior_counts:
+            self.prior_counts[:] = 0
+
+        self.allocate_budget()
+
+    # ------------------------------------------------------------------
+    # Source validation
+    # ------------------------------------------------------------------
+
+    def _validate_source_scheme(self, source_scheme):
+        """
+        Validate that the source scheme is compatible with this scheme.
+        """
+        if not hasattr(source_scheme, "settings_dict"):
+            raise ValueError("source_scheme must have a settings_dict attribute.")
+
+        if len(source_scheme.settings_dict) == 0:
+            raise ValueError(
+                "source_scheme.settings_dict is empty. There are no settings "
+                "from which to build a group pool."
+            )
+
+        if not hasattr(source_scheme, "obs"):
+            raise ValueError("source_scheme must have an obs attribute.")
+
+        if not hasattr(source_scheme, "num_obs"):
+            raise ValueError("source_scheme must have a num_obs attribute.")
+
+        if not hasattr(source_scheme, "num_qubits"):
+            raise ValueError("source_scheme must have a num_qubits attribute.")
+
+        if int(source_scheme.num_obs) != int(self.num_obs):
+            raise ValueError(
+                "source_scheme.num_obs does not match this scheme. "
+                f"source_scheme.num_obs={source_scheme.num_obs}, "
+                f"self.num_obs={self.num_obs}."
+            )
+
+        if int(source_scheme.num_qubits) != int(self.num_qubits):
+            raise ValueError(
+                "source_scheme.num_qubits does not match this scheme. "
+                f"source_scheme.num_qubits={source_scheme.num_qubits}, "
+                f"self.num_qubits={self.num_qubits}."
+            )
+
+        source_obs = np.asarray(source_scheme.obs)
+        target_obs = np.asarray(self.obs)
+
+        if source_obs.shape != target_obs.shape:
+            raise ValueError(
+                "source_scheme.obs has a different shape from self.obs. "
+                f"source shape={source_obs.shape}, target shape={target_obs.shape}."
+            )
+
+        if not np.array_equal(source_obs, target_obs):
+            raise ValueError(
+                "source_scheme.obs and self.obs differ. Best_scheme_given_pool "
+                "requires the same observable array and ordering, because "
+                "settings_dict tokens encode observable indices."
+            )
+
+        if not hasattr(source_scheme, "commutativity_type"):
+            raise ValueError("source_scheme must have a commutativity_type attribute.")
+
+        source_comm = str(source_scheme.commutativity_type).lower()
+
+        if source_comm != self.commutativity_type:
+            raise ValueError(
+                "source_scheme.commutativity_type does not match this scheme. "
+                f"source={source_comm!r}, target={self.commutativity_type!r}."
+            )
+
+        if not hasattr(source_scheme, "is_overlapping"):
+            raise ValueError("source_scheme must have an is_overlapping attribute.")
+
+        source_overlap = bool(source_scheme.is_overlapping)
+
+        if source_overlap != self.is_overlapping:
+            raise ValueError(
+                "source_scheme.is_overlapping does not match this scheme. "
+                f"source={source_overlap}, target={self.is_overlapping}. "
+                "The allocation solver uses is_overlapping to choose between "
+                "non-overlapping and overlapping allocation."
+            )
+
+        if self.commutativity_type == "kc":
+            if not hasattr(source_scheme, "k"):
+                raise ValueError(
+                    "source_scheme must have a k attribute when commutativity_type='kc'."
+                )
+
+            if int(source_scheme.k) != int(self.k):
+                raise ValueError(
+                    "source_scheme.k does not match this scheme. "
+                    f"source={int(source_scheme.k)}, target={int(self.k)}."
+                )
+
+            if not hasattr(source_scheme, "fc_blocks_dict"):
+                raise ValueError(
+                    "source_scheme must have an fc_blocks_dict attribute when "
+                    "commutativity_type='kc'."
+                )
+
+    # ------------------------------------------------------------------
+    # Imported group post-processing
+    # ------------------------------------------------------------------
+
+    def _postprocess_imported_groups(self, token_group_pairs):
+        """
+        Canonicalize and deduplicate imported groups.
+
+        Unlike Sorted_Insertion_OGM and Greedy_Clique_Cover, this method does
+        not perform coverage repair by adding singleton groups. The imported
+        pool is treated as fixed.
+
+        Parameters
+        ----------
+        token_group_pairs : list[tuple[bytes, np.ndarray]]
+            Pairs of source token and decoded observable-index group.
+
+        Returns
+        -------
+        groups : list[np.ndarray]
+            Canonical unique groups.
+
+        canonical_to_source_token : dict[bytes, bytes]
+            Map from canonical token to the first source token that produced it.
+        """
+        groups = []
+        seen = set()
+        canonical_to_source_token = {}
+
+        for source_token, group in token_group_pairs:
+            arr = np.asarray(group, dtype=np.int32).ravel()
+
+            if arr.size == 0:
+                continue
+
+            if np.any(arr < 0) or np.any(arr >= self.num_obs):
+                raise ValueError(
+                    "A source setting contains observable indices outside "
+                    f"the valid range [0, {self.num_obs})."
+                )
+
+            arr = np.unique(arr)
+            arr.sort()
+
+            canonical_token = encode_setting_token(arr)
+
+            if canonical_token in seen:
+                # Keep the first occurrence. For kC, this also means keeping
+                # the first block metadata if duplicate observable groups occur.
+                continue
+
+            seen.add(canonical_token)
+            groups.append(arr)
+            canonical_to_source_token[canonical_token] = source_token
+
+        if len(groups) == 0:
+            raise ValueError(
+                "No usable groups were decoded from source_scheme.settings_dict."
+            )
+
+        return groups, canonical_to_source_token
+
+    def _validate_nonoverlapping_groups(self, groups):
+        """
+        Validate that the imported group list is a true partition.
+
+        Required when is_overlapping=False, because the non-overlapping
+        allocation solver assumes each observable appears exactly once.
+        """
+        counts = np.zeros(self.num_obs, dtype=np.int32)
+
+        for arr in groups:
+            counts[arr] += 1
+
+        missing = np.flatnonzero(counts == 0)
+        repeated = np.flatnonzero(counts > 1)
+
+        if missing.size > 0 or repeated.size > 0:
+            msg_parts = [
+                "Best_scheme_given_pool received groups that are not a "
+                "non-overlapping partition despite is_overlapping=False."
+            ]
+
+            if missing.size > 0:
+                msg_parts.append(
+                    f"Missing observables: {missing[:20].tolist()}"
+                    + (" ..." if missing.size > 20 else "")
+                )
+
+            if repeated.size > 0:
+                msg_parts.append(
+                    f"Repeated observables: {repeated[:20].tolist()}"
+                    + (" ..." if repeated.size > 20 else "")
+                )
+
+            msg_parts.append(
+                "Use is_overlapping=True or provide a source scheme whose "
+                "settings form a true partition."
+            )
+
+            raise ValueError(" ".join(msg_parts))
+
+    def _validate_coverage_for_allocation(self, groups):
+        """
+        Validate coverage of positive-weight observables.
+
+        Because this class imports a fixed pool, it does not add coverage-repair
+        singleton groups. If positive-weight observables are uncovered and have
+        no prior samples, allocation without truncation would silently ignore or
+        leave them impossible to measure. Therefore, this is only allowed when
+        attempt_truncation=True.
+        """
+        covered = np.zeros(self.num_obs, dtype=bool)
+
+        for arr in groups:
+            covered[arr] = True
+
+        absw = np.abs(np.asarray(self.w, dtype=np.float64)).reshape(-1)
+        prior = np.asarray(self.prior_counts, dtype=np.float64).reshape(-1)
+
+        positive_uncovered = (~covered) & (absw > 0.0)
+        positive_uncovered_no_prior = positive_uncovered & (prior <= 0.0)
+
+        missing_positive_no_prior = np.flatnonzero(positive_uncovered_no_prior)
+
+        if missing_positive_no_prior.size > 0 and not self.attempt_truncation:
+            raise ValueError(
+                "The imported setting pool does not cover all positive-weight "
+                "observables with zero prior counts, and attempt_truncation=False. "
+                "Uncovered positive-weight observables would have no samples and "
+                "would not be accounted for by a truncation penalty. "
+                f"First missing indices: {missing_positive_no_prior[:20].tolist()}"
+                + (" ..." if missing_positive_no_prior.size > 20 else "")
+            )
+
+        self.imported_pool_info.update(
+            {
+                "num_covered_observables": int(np.count_nonzero(covered)),
+                "num_uncovered_observables": int(np.count_nonzero(~covered)),
+                "num_uncovered_positive_weight_observables": int(
+                    np.count_nonzero(positive_uncovered)
+                ),
+                "num_uncovered_positive_weight_zero_prior_observables": int(
+                    missing_positive_no_prior.size
+                ),
+            }
+        )
+
+    def _copy_kc_metadata(self, source_scheme, canonical_to_source_token):
+        """
+        Copy kC block metadata from the source scheme.
+
+        The copied dictionary is keyed by canonical observable-index tokens,
+        which are the same type of keys produced later by _AllocationMixin when
+        committing the selected allocation.
+        """
+        if self.commutativity_type != "kc":
+            return
+
+        self.fc_blocks_dict = {}
+
+        for canonical_token, source_token in canonical_to_source_token.items():
+            if source_token not in source_scheme.fc_blocks_dict:
+                raise ValueError(
+                    "Missing kC block metadata in source_scheme.fc_blocks_dict "
+                    "for an imported setting token."
+                )
+
+            self.fc_blocks_dict[canonical_token] = source_scheme.fc_blocks_dict[source_token]
+
+    # ------------------------------------------------------------------
+    # Group import
+    # ------------------------------------------------------------------
+
+    def get_groups(self, source_scheme):
+        """
+        Import the setting pool from source_scheme.settings_dict.
+
+        Each key in source_scheme.settings_dict is decoded as a sorted list of
+        observable indices. The resulting groups are canonicalized and
+        deduplicated, but no coverage-repair groups are added.
+        """
+        self._validate_source_scheme(source_scheme)
+
+        token_group_pairs = []
+
+        for token in source_scheme.settings_dict.keys():
+            if not isinstance(token, (bytes, bytearray, memoryview)):
+                raise TypeError(
+                    "settings_dict keys must be byte-like tokens produced by "
+                    "encode_setting_token."
+                )
+
+            token_bytes = bytes(token)
+            group = decode_setting_token(token_bytes).astype(np.int32, copy=True)
+
+            token_group_pairs.append((token_bytes, group))
+
+        self.imported_pool_info["num_imported_settings_raw"] = int(
+            len(token_group_pairs))
+
+        groups, canonical_to_source_token = self._postprocess_imported_groups(
+            token_group_pairs)
+
+        self.imported_pool_info["num_imported_settings_unique"] = int(len(groups))
+
+        if not self.is_overlapping:
+            self._validate_nonoverlapping_groups(groups)
+
+        self._validate_coverage_for_allocation(groups)
+
+        if self.commutativity_type == "kc":
+            self._copy_kc_metadata(source_scheme, canonical_to_source_token)
+
+        self.cliques_pool = groups
+
+        return groups
 
 

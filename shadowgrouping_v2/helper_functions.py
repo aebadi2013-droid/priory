@@ -871,3 +871,17 @@ def encode_setting_token(setting: np.ndarray) -> bytes:
         """
         arr = np.asarray(setting, dtype=np.int32)
         return arr.tobytes(order="C")
+
+
+def decode_setting_token(token: bytes) -> np.ndarray:
+    """
+    Decode a token produced by encode_setting_token.
+
+    In the current Energy_estimator workflow, tokens encode the sorted
+    indices of Hamiltonian Pauli strings measured in one round, for QWC,
+    FC, and kC alike.
+
+    The physical measurement basis/circuit is reconstructed later from
+    these observable indices and the estimator's compat_type.
+    """
+    return np.frombuffer(token, dtype=np.int32)
