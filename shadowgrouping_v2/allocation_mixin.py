@@ -713,7 +713,7 @@ class _AllocationMixin:
 
             row = np.zeros(M, dtype=bool)
             row[clique] = True
-            self._append_is_hit_row(row)
+            #self._append_is_hit_row(row)
 
             self.N_hits[clique] += r
 

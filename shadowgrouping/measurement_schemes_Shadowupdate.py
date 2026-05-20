@@ -964,6 +964,7 @@ class Priori(Measurement_scheme):
                 "(i.e. number of observables) but returned an array of shape {}".format(self.w.shape, test.shape)
             )
         self.is_sampling = False
+        self.commutativity_type = 'qwc'
         return
 
     
@@ -1249,7 +1250,7 @@ class Priori(Measurement_scheme):
         self.provablegaurantee.append(info["Provable Gaurantee"])
         if verbose:
             print("Finished assigning with total weight of",info["total_weight"])
-        return setting, info
+        return setting_indices, info
 
 
 class Posteriori(Measurement_scheme):
