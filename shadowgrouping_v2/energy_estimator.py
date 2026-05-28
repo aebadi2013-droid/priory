@@ -479,6 +479,7 @@ class Energy_estimator(SteadyStateAllocatorMixin):
             # Sanity check: Are all observables in setting QWC?
             selected_obs = ms.obs[obs_ids]
             ok = hit_by_batch_numba(selected_obs, setting_int).astype(bool)
+            #print("checking compatibility", ok)
             if not np.all(ok):
                 raise RuntimeError(
                     "Decoded QWC token contains observables that are not all hit by "

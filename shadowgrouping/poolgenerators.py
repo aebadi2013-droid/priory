@@ -36,46 +36,6 @@ def gcomm(O, P):
     return fail_commuting_count % 2 == 0  # Check if the fail to commute in even number of indices
 
 
-def sample_obs_from_setting(O,P):
-    for o, p in zip(O, P):
-        if o != 0 and o != p:
-            return False
-    return True
-
-def hit_by_numba(O, P):
-    """
-    Numba-accelerated version of hit_by for a single observable and setting.
-    """
-    n = len(O)
-    for i in range(n):
-        o = O[i]
-        p = P[i]
-        if not (o == 0 or p == 0 or o == p):
-            return False
-    return True
-
-def hit_by_batch_numba(O_batch, P):
-    n_obs, n_qubits = O_batch.shape
-    result = np.empty(n_obs, dtype=np.bool_)
-    
-    for i in range(n_obs):
-        compatible = True
-        for j in range(n_qubits):
-            o = O_batch[i, j]
-            p = P[j]
-            if not (o == 0 or p == 0 or o == p):
-                compatible = False
-                break
-        result[i] = compatible
-    
-    return result
-
-def setting_to_str(arr):
-    out = ""
-    for a in np.array(arr).flatten():
-        out += str(a)
-    return out
-
 def pauli_string_to_array(pauli_str):
     mapping = {'I': 0, 'X': 1, 'Y': 2, 'Z': 3}
     return np.array([mapping[c] for c in pauli_str])
@@ -163,7 +123,34 @@ def DomClique1(A):
 
     return MaxCliques
 
-
+# returns a largest-degree-first clique partition of a graph
+def LDF(A):
+    # Inputs:
+    #     A - (graph) - graph for which partition should be found
+    # Outputs:
+    #     (list{list{int}}) - a list containing cliques which partition A
+    # This implementation expects a NetworkX graph `A` and returns cliques
+    # as lists of the original node labels (same output shape as DomClique1).
+    nodes = list(A.nodes())
+    node_to_idx = {n: i for i, n in enumerate(nodes)}
+    p = len(nodes)
+    remaining = set(range(p))
+    N = {}
+    for i, n in enumerate(nodes):
+        N[i] = set(node_to_idx[nb] for nb in A.neighbors(n))
+    aaa = []
+    while remaining:
+        a = max(remaining, key=lambda x: len(N[x] & remaining))
+        aa0 = set([a])
+        aa1 = N[a] & remaining
+        while aa1:
+            a2 = max(aa1, key=lambda x: len(N[x] & aa1))
+            aa0.add(a2)
+            aa1 &= N[a2]
+        aaa.append(aa0)
+        remaining -= aa0
+    # Map indices back to original node labels to match DomClique1 output
+    return [sorted([nodes[i] for i in aa]) for aa in aaa]
 
 # equation 6 from manuscript
 N_delta = lambda delta: 4*(2*np.sqrt(-np.log(delta))+1)**2
@@ -393,10 +380,6 @@ class Priori_Pool(Measurement_scheme):
             bound = np.exp(-0.25*(self.eps/2/np.sum(np.abs(self.w)/np.sqrt(self.N_hits))-1)**2)
         return bound            
 
-    def total_hit_weight(self, weights, is_hit):
-        weights = np.asarray(weights, dtype=float)
-        is_hit = np.asarray(is_hit, dtype=bool)
-        return (weights * is_hit).sum()
     
     def find_setting(self,verbose=False):
         """ Finds the next measurement setting. Can be verbosed to gain further information during the procedure. """
@@ -404,38 +387,17 @@ class Priori_Pool(Measurement_scheme):
             self.build_graph_and_cliques()
         
         weights = self.weight_function(self.w, self.eps, self.N_hits)
-        order = np.argsort(weights)
-        completecliques = 0
-        incompletesetting = 0
 
         self.cliques_with_epsilon = []
         self.settings_rounds = []
         for setting_candidate in self._cached_settings:
             working = setting_candidate.copy()
-            if np.min(working) == 0:
-                incompletesetting += 1
-                for idx in reversed(order):
-                    o = self.obs[idx]
-                    if verbose:
-                        print("Checking",o)
-                    if hit_by(o,working):
-                        non_id = o!=0
-                        # overwrite those qubits that fall in the support of o
-                        working[non_id] = o[non_id]
-                    if verbose:
-                        print("p =",working)
-                    # break sequence is case all identities in setting are exhausted
-                    if np.min(working) > 0:
-                        break
-                completecliques += 1
-            else:
-                completecliques += 1
             is_hit = []
             # update number of hits
             is_hit = hit_by_batch_numba(self.obs , working)
             self.N_hits += is_hit
 
-            
+
             # Tokenize by the set of compatible observable indices
             setting_indices = np.nonzero(is_hit)[0].astype(np.int32)
             setting_indices.sort()
@@ -457,8 +419,6 @@ class Priori_Pool(Measurement_scheme):
             print("round number" , self.round_num)
         print("Pool of settings is constructed)")
         return
-
-
 
 
   
@@ -525,3 +485,116 @@ class OGM_Pool(Measurement_scheme):
         )
         
         return
+    
+
+class AEQUO_Pool(Measurement_scheme):
+    """ Generates a pool of measurement settings using a graph based method and the concept of cliques. This class will provide a pool suitable for another class called 
+        Best_scheme_given_pool, which will then does a convex optimization over the pool to find the best measurement scheme given the pool. 
+        You should be cautious about the tokenization of settings in this class which is designed to be usable by the Best_scheme_given_pool class. 
+    """
+    
+    def __init__(self, observables, weights, epsilon, weight_function, cov_real, compute_N_hits_pairs=True):
+        # Convert Pauli strings to arrays FIRST
+        #observablesarray = [pauli_string_to_array(o) for o in observables]
+        # Then pass converted observables into super().__init__()
+        #super().__init__(observablesarray, weights, epsilon)
+        super().__init__(observables,weights,epsilon)
+        #self.settings_dict = {} #222222
+        self.N_hits = np.zeros_like(self.N_hits)
+        self.cov_real = cov_real
+        self.compute_N_hits_pairs = compute_N_hits_pairs
+        if compute_N_hits_pairs:
+            self.N_hits_pairs = np.zeros((self.num_obs, self.num_obs), dtype=int)
+        self.weight_function = weight_function
+        self.round_num = 0
+        self.rounds = []
+        self.selected_cliques = []  # Stores best cliques from each round
+        self.cliques_with_epsilon = []
+        self.settings_rounds = []
+        self._cached_graph = build_hit_graph(observables)
+        self._cached_cliques = list(LDF(self._cached_graph))
+        #self._cached_cliques = list(DomClique1(self._cached_graph))
+        self._cached_settings = []
+        for clique in self._cached_cliques:
+            setting_candidate = np.zeros(self.num_qubits, dtype=int)
+            for o in clique:
+                o_arr = np.array(o)
+                if hit_by(o_arr, setting_candidate):
+                    non_id = o_arr != 0
+                    setting_candidate[non_id] = o_arr[non_id]
+                    if np.min(setting_candidate) > 0:
+                        break
+            if np.min(setting_candidate) == 0:
+                setting_candidate[setting_candidate == 0] = 3 
+            self._cached_settings.append(setting_candidate.copy())
+        
+        if self.weight_function is not None:
+            test = self.weight_function(self.w, self.eps, self.N_hits)
+            assert len(test) == len(self.w), (
+                "Weight function is supposed to return an array of shape {} "
+                "(i.e. number of observables) but returned an array of shape {}".format(self.w.shape, test.shape)
+            )
+        self.is_sampling = False
+        self.commutativity_type = 'qwc'
+        return
+
+    
+    def reset(self):
+        self.N_hits = np.zeros_like(self.N_hits)
+        self.N_hits_pairs  = np.zeros_like(self.N_hits_pairs)
+        self._hit_outer_cache = {}
+        self.settings_dict = {}
+        self.settings_buffer = {}
+        return
+
+    # Equation 27,28 and 29
+    def get_inconfidence_bound(self):
+        inconf = np.exp( -0.5*self.eps*self.eps*self.N_hits/(self.w**2) )
+        return np.sum(inconf)
+
+    #Equation 22
+    def get_Bernstein_bound(self):
+        if np.min(self.N_hits) == 0:
+            bound = -1
+        else:
+            bound = np.exp(-0.25*(self.eps/2/np.sum(np.abs(self.w)/np.sqrt(self.N_hits))-1)**2)
+        return bound            
+
+    
+    def find_setting(self,verbose=False):
+        """ Finds the next measurement setting. Can be verbosed to gain further information during the procedure. """
+        if self._cached_graph is None or self._cached_cliques is None:
+            self.build_graph_and_cliques()
+        
+        weights = self.weight_function(self.w, self.eps, self.N_hits)
+        #print("cached settings:", self._cached_settings)
+        self.cliques_with_epsilon = []
+        self.settings_rounds = []
+        for setting_candidate in self._cached_settings:
+            working = setting_candidate.copy()
+            is_hit = []
+            # update number of hits
+            is_hit = hit_by_batch_numba(self.obs , working)
+            self.N_hits += is_hit
+            # Tokenize by the set of compatible observable indices
+            setting_indices = np.nonzero(is_hit)[0].astype(np.int32)
+            setting_indices.sort()
+            token = encode_setting_token(setting_indices)
+            self.settings_rounds.append(np.asarray(setting_indices, dtype=np.int32))
+
+        # Update the dict(s) of distinct settings and how often they occur
+        order_attr = getattr(self, "order", None) if hasattr(self, "order") else None
+        settings_to_dict(
+            self.settings_rounds,
+            self.settings_dict,
+            self.settings_buffer,
+            order=order_attr
+        )
+
+        self.round_num += 1    
+        self.rounds.append(len(self.rounds) + 1)
+        if verbose:
+            print("round number" , self.round_num)
+        print("Pool of settings is constructed)")
+        return
+
