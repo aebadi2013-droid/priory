@@ -544,6 +544,32 @@ def LDF(A):
         remaining -= aa0
     return [sorted(list(aa)) for aa in aaa]
 
+
+def LDF_weighted(A):
+    """
+    Largest-weight-first clique partition.
+    Select vertices in decreasing order of their vertex weight (diagonal of A.adj)
+    instead of by degree. Otherwise follows the same greedy clique-building logic
+    as `LDF`.
+    """
+    p = A.ord()
+    remaining = set(range(p))
+    # vertex weights taken from diagonal of adjacency matrix
+    weights = np.diag(A.adj).tolist() if p > 0 else []
+    N = {i: A.neighbors(i) for i in range(p)}
+    aaa = []
+    while remaining:
+        a = max(remaining, key=lambda x: weights[x])
+        aa0 = set([a])
+        aa1 = N[a] & remaining
+        while aa1:
+            a2 = max(aa1, key=lambda x: weights[x])
+            aa0.add(a2)
+            aa1 &= N[a2]
+        aaa.append(aa0)
+        remaining -= aa0
+    return [sorted(list(aa)) for aa in aaa]
+
 # returns the qubitwise commutation graph of a given Pauli
 def qubitwise_commutation_graph(P):
     # Inputs:
