@@ -188,7 +188,7 @@ class SteadyStateAllocatorMixin:
         Note:
           N_hits/N_hits_pairs/is_hit_array/save_scheme updates happen INSIDE find_setting.
         """
-        p = self.measurement_scheme.find_setting()
+        p , _ = self.measurement_scheme.find_setting()
         self.steady_find_calls += 1
 
         token = self._steady_tokenize(p)
@@ -262,19 +262,19 @@ class SteadyStateAllocatorMixin:
             return
 
         # Fixed-size windows
-        assert self.steady_w > 0, "Internal error: steady_w must be > 0 outside FIRST_WINDOW."
+        assert self.steady_W > 0, "Internal error: steady_w must be > 0 outside FIRST_WINDOW."
 
         required = int(np.ceil((self.steady_c_beta ** 2) * self.steady_S_eff))
 
         if self.steady_phase == "SIZING":
             # Ensure W large enough for noise floor scaling
-            if self.steady_w < required:
-                old = int(self.steady_w)
-                self.steady_w = int(2 * old)
+            if self.steady_W < required:
+                old = int(self.steady_W)
+                self.steady_W = int(2 * old)
                 if verbose:
                     print(
                         f"[W update] round={self.num_settings}  SIZING "
-                        f"S_eff={self.steady_S_eff:.3f}  required={required}  W:{old}->{self.steady_w}"
+                        f"S_eff={self.steady_S_eff:.3f}  required={required}  W:{old}->{self.steady_W}"
                     )
                 self._steady_reset_window_accumulators()
                 return
@@ -284,7 +284,7 @@ class SteadyStateAllocatorMixin:
             self.steady_prev_win_counts = dict(self.steady_win_counts)
             if verbose:
                 print(
-                    f"[CHECKING start] round={self.num_settings}  W={self.steady_w}  "
+                    f"[CHECKING start] round={self.num_settings}  W={self.steady_W}  "
                     f"S_eff={self.steady_S_eff:.3f}  required={required}"
                 )
             self._steady_reset_window_accumulators()
@@ -292,13 +292,13 @@ class SteadyStateAllocatorMixin:
 
         if self.steady_phase == "CHECKING":
             # If complexity increased so much W is too small again, go back to sizing
-            if self.steady_w < required:
-                old = int(self.steady_w)
-                self.steady_w = int(2 * old)
+            if self.steady_W < required:
+                old = int(self.steady_W)
+                self.steady_W = int(2 * old)
                 if verbose:
                     print(
                         f"[W update] round={self.num_settings}  CHECKING->SIZING "
-                        f"S_eff={self.steady_S_eff:.3f}  required={required}  W:{old}->{self.steady_w}"
+                        f"S_eff={self.steady_S_eff:.3f}  required={required}  W:{old}->{self.steady_W}"
                     )
                 self.steady_phase = "SIZING"
                 self.steady_prev_win_counts = None
@@ -323,7 +323,7 @@ class SteadyStateAllocatorMixin:
                 nm = float(self.steady_last_new_mass)
                 nmT = float(self.steady_last_new_mass_thresh)
                 print(
-                    f"[CHECK] round={self.num_settings}  W={self.steady_w}  "
+                    f"[CHECK] round={self.num_settings}  W={self.steady_W}  "
                     f"TV_shared={tv:.6g}<= {tvT:.6g}   "
                     f"new_mass={nm:.6g}<= {nmT:.6g}   "
                     f"{'PASS' if converged else 'FAIL'}"
@@ -375,7 +375,7 @@ class SteadyStateAllocatorMixin:
         if prev is None or curr is None:
             return False
 
-        W = int(self.steady_w)
+        W = int(self.steady_W)
         if W <= 0:
             return False
 
