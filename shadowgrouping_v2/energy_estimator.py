@@ -675,7 +675,8 @@ class Energy_estimator(SteadyStateAllocatorMixin):
             entry = self._get_basis_cache_entry(setting_token, ms)
             obs_ids = entry["obs_ids"]
             circuit = entry["circuit"]
-    
+
+
             samples = self.state.sample(
                 basis_transformation_circuit=circuit,
                 nshots=reps_eff,

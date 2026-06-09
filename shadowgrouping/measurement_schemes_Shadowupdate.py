@@ -1818,7 +1818,7 @@ class Shadow_Grouping(Measurement_scheme):
         self.N_hits = np.zeros_like(self.N_hits)
         self.N_hits_pairs  = np.zeros_like(self.N_hits_pairs)
         self._hit_outer_cache = {}
-        self.settings_dict = {} #22222222222
+        self.settings_dict = {} 
         self.settings_buffer = {}
         return
     
