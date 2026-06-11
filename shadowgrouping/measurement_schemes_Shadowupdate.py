@@ -1892,7 +1892,7 @@ class Shadow_Grouping(Measurement_scheme):
         self.rounds.append(len(self.rounds) + 1)
         # further info for comparisons
         info = {}
-        info["total_weight"] = np.sum(weights[is_hit])
+        """info["total_weight"] = np.sum(weights[is_hit])
         info["inconfidence_bound"] = self.get_inconfidence_bound()
         info["Bernstein bound"] = self.get_Bernstein_bound()
         info["Provable Gaurantee"] = Guaranteed_accuracy(delta, self.N_hits, self.w, split=False)
@@ -1921,7 +1921,7 @@ class Shadow_Grouping(Measurement_scheme):
         self.eps_chebyshev_tightest.append(info["epsilon_chebyshev_tightest"])
         if verbose:
             print("Finished assigning with total weight of",info["total_weight"])
-        #print("update0 info is",info)
+        #print("update0 info is",info)"""
         return setting_indices, info
 
 class ShadowBucket(Measurement_scheme):
