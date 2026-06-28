@@ -2271,7 +2271,7 @@ class Brute_force_matching(Shadow_Grouping):
             
         return np.array(setting), info        
 
-class AdaptiveShadows(Shadow_Grouping):
+class AdaptiveShadows(Measurement_scheme):
     """ Comparison class to Shadow_Grouping, based on https://github.com/charleshadfield/adaptiveshadows/.
         Starts-off as classical shadows (uniformly at random) but biases the distribution
         the more the Pauli bases have been set. Does not require any hyperparameters.
@@ -2280,9 +2280,10 @@ class AdaptiveShadows(Shadow_Grouping):
         Returns p and a dictionary info holding further details on the matching procedure.
     """
     
-    def __init__(self,observables,weights,epsilon=0.1):
-        super().__init__(observables,weights,epsilon,None)
+    def __init__(self,observables,weights,epsilon=0.1, cov_real=None):
+        super().__init__(observables,weights,epsilon)
         self.is_sampling = True
+        self.cov_real = cov_real
         return
     
     def __isCompatible(self, pauli, j, qubits_shift, bases_shift):
@@ -2348,13 +2349,12 @@ class AdaptiveShadows(Shadow_Grouping):
         # update number of hits
         is_hit = np.array([hit_by(o,setting) for o in self.obs],dtype=bool)
         self.N_hits += is_hit
-        
-        info = {"inconfidence_bound": self.get_inconfidence_bound(),
-                "Bernstein bound":    self.get_Bernstein_bound(),
-                "run_time":           tend - tstart
-               }
+        setting_indices = np.nonzero(is_hit)[0].astype(np.int32)
+        setting_indices.sort()
+        token = encode_setting_token(setting_indices)
+        info = {}
             
-        return np.array(setting), info
+        return setting_indices, info
             
 class SettingSampler(Measurement_scheme):
     """ Comparison class to ShadowGrouping if the sampling distribution p can be provided explicitly.
@@ -2401,7 +2401,7 @@ class SettingSampler(Measurement_scheme):
             Q = Q.flatten()
         return Q, {"N_samples": N_samples}
     
-class Derandomization(Shadow_Grouping):
+class Derandomization(Measurement_scheme):
 
     """ Finds the next measurement setting following the derandomization procedure.
         Optionally, a parameter delta in [0,1] can be provided to vary the degree of randomness (delta == 1 fully random, delta == 0 as proposed).
@@ -2409,8 +2409,8 @@ class Derandomization(Shadow_Grouping):
         If use_one_norm, implements a 1-norm weighting to the bound as proposed in the paper.
     """
 
-    def __init__(self,observables,weights,epsilon,delta=0,num_measurements=None,use_one_norm=False):
-        super().__init__(observables,weights,epsilon,None)
+    def __init__(self,observables,weights,epsilon,cov_real=None,delta=0,num_measurements=None,use_one_norm=False):
+        super().__init__(observables,weights,epsilon)
         
         self.num_measurements = num_measurements
         # (n x M) integer array with entries in {0,1,2,3} == {E,X,Y,Z}
@@ -2420,6 +2420,7 @@ class Derandomization(Shadow_Grouping):
         self.eps_greedy = delta
         self.scheme_params["eps_greedy"] = delta
         self.scheme_params["use_one_norm"] = use_one_norm
+        self.cov_real = cov_real
         
         if use_one_norm:
             self.use_one_norm = True
@@ -2447,6 +2448,10 @@ class Derandomization(Shadow_Grouping):
         self.last_assignment = None
         return
     
+    def get_inconfidence_bound(self):
+        inconf = np.exp( -0.5*self.eps*self.eps*self.N_hits/(self.w**2) )
+        return np.sum(inconf)
+
     def __step(self, action):
         """ Tries out the effect of the chosen assignment.
             Returns the corresponding inconfidence bound upon this choice and an increment.
@@ -2542,13 +2547,20 @@ class Derandomization(Shadow_Grouping):
             
         # further information
         #info["total_weight"] = np.sum(self.get_inconf()[increment])
-        info["inconfidence_bound"] = self.get_inconfidence_bound()
-        info["Bernstein bound"] = self.get_Bernstein_bound()
-        info["run_time"] = tend - tstart
+        #info["inconfidence_bound"] = self.get_inconfidence_bound()
+        #info["Bernstein bound"] = self.get_Bernstein_bound()
+        #info["run_time"] = tend - tstart
         #if verbose:
             #print("Finished assigning with total weight of",info["total_weight"])
+
+        setting_indices = np.nonzero(increment)[0].astype(np.int32)
+        setting_indices.sort()
+        token = encode_setting_token(setting_indices)
+        info = {}
+            
+        return setting_indices, info
         
-        return np.array(self.last_assignment), info
+        #return np.array(self.last_assignment), info
 
 
 
