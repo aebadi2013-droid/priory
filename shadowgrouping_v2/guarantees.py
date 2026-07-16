@@ -723,3 +723,16 @@ def Guaranteed_accuracy(delta, N_hits, w, split=True):
         return eps_stat, eps_sys
     else:
         return eps_stat + eps_sys
+
+
+def get_epsilon_Chebyshev_scalar_tightest_numba(delta, N_hits, N_hits_pairs, w, cov_real):
+    """Numba-accelerated Chebyshev bound."""
+    if not (0 < delta < 1):
+        raise ValueError("delta must be in the interval (0,1)")
+
+    N_hits = np.asarray(N_hits, dtype=np.int64)
+    N_hits_pairs = np.asarray(N_hits_pairs, dtype=np.float64)
+    w = np.asarray(w, dtype=np.float64)
+
+    eps_stat, eps_sys = _chebyshev_tightest_core(delta, N_hits, N_hits_pairs, w, cov_real)
+    return eps_stat + eps_sys

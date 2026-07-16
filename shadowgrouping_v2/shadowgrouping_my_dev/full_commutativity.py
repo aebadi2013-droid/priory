@@ -1,4 +1,5 @@
 import numpy as np, numba
+from numba import njit, prange
 from typing import List, Tuple, Dict, Optional, Set
 from qibo import models, gates
 from qiskit import QuantumCircuit, transpile
@@ -10,7 +11,7 @@ from qiskit.synthesis import synth_cnot_depth_line_kms
 from qiskit.transpiler import CouplingMap, PassManager
 from qiskit.transpiler.passes import CollectLinearFunctions
 
-from .helper_functions import decompose_dense_clifford_gates, gates_to_qiskit_circuit
+from shadowgrouping_v2.shadowgrouping_my_dev.helper_functions import decompose_dense_clifford_gates, gates_to_qiskit_circuit
 
 Gate = Tuple[str, Tuple[int, ...]]  # ('H',(q,)), ('S',(q,)), ('CNOT',(a,b)), ('CZ',(a,b)), ('SWAP',(a,b))
 
@@ -20,13 +21,20 @@ class _GF2LinearBasis:
     Supports:
       - add(v): True iff v is independent (and gets added)
       - contains(v): True iff v is in the span of the current basis
+      - copy(): returns an independent copy of the current basis
     """
     __slots__ = ("max_bits", "basis", "rank")
 
     def __init__(self, max_bits: int):
         self.max_bits = int(max_bits)
-        self.basis = [0] * self.max_bits  # basis[pivot_bit] = vector with that pivot
+        self.basis = [0] * self.max_bits
         self.rank = 0
+
+    def copy(self):
+        other = _GF2LinearBasis(self.max_bits)
+        other.basis = self.basis.copy()
+        other.rank = self.rank
+        return other
 
     def add(self, v: int) -> bool:
         v = int(v)
@@ -136,6 +144,84 @@ def check_commuting(Z: np.ndarray, X: np.ndarray) -> bool:
             if sip != 0:
                 return False
     return True
+
+@njit(parallel=True)
+def compute_exact_compat_degrees_qwc(obs_int8):
+    M, N = obs_int8.shape
+    degrees = np.zeros(M, dtype=np.float32)
+    for i in prange(M):
+        deg = 0
+        for j in range(M):
+            commutes = True
+            for k in range(N):
+                a = obs_int8[i, k]
+                b = obs_int8[j, k]
+                if a != 0 and b != 0 and a != b:
+                    commutes = False
+                    break
+            if commutes:
+                deg += 1
+        degrees[i] = deg
+    return degrees
+
+@njit(parallel=True)
+def compute_exact_compat_degrees_fc(obs_int8):
+    M, N = obs_int8.shape
+    degrees = np.zeros(M, dtype=np.float32)
+    for i in prange(M):
+        deg = 0
+        for j in range(M):
+            anti_commutes = 0
+            for k in range(N):
+                a = obs_int8[i, k]
+                b = obs_int8[j, k]
+                if a != 0 and b != 0 and a != b:
+                    anti_commutes += 1
+            if anti_commutes % 2 == 0:
+                deg += 1
+        degrees[i] = deg
+    return degrees
+
+@njit(parallel=True)
+def compute_approx_compat_degrees_qwc(obs_int8, n_samples=1000):
+    M, N = obs_int8.shape
+    degrees_est = np.zeros(M, dtype=np.float32)
+    k = min(n_samples, M)
+    for i in prange(M):
+        deg_count = 0
+        for step in range(k):
+            j = (i * 73 + step * 101) % M
+            commutes = True
+            for c in range(N):
+                a = obs_int8[i, c]
+                b = obs_int8[j, c]
+                if a != 0 and b != 0 and a != b:
+                    commutes = False
+                    break
+            if commutes:
+                deg_count += 1
+        degrees_est[i] = (deg_count / k) * M
+    return degrees_est
+
+@njit(parallel=True)
+def compute_approx_compat_degrees_fc(obs_int8, n_samples=1000):
+    M, N = obs_int8.shape
+    degrees_est = np.zeros(M, dtype=np.float32)
+    k = min(n_samples, M)
+    for i in prange(M):
+        deg_count = 0
+        for step in range(k):
+            j = (i * 73 + step * 101) % M
+            anti_commutes = 0
+            for c in range(N):
+                a = obs_int8[i, c]
+                b = obs_int8[j, c]
+                if a != 0 and b != 0 and a != b:
+                    anti_commutes += 1
+            if anti_commutes % 2 == 0:
+                deg_count += 1
+        degrees_est[i] = (deg_count / k) * M
+    return degrees_est
 
 def cnot_depth_qiskit(qc, swap_cost: int = 3) -> int:
     """
