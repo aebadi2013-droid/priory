@@ -1,0 +1,381 @@
+For STD
+
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+[W update] round=105  FIRST_WINDOW done (len=105)  S_eff=105.000  -> W=3056
+[summary] find_setting calls in this allocation: 1000 / 1000 = 1.000000
+For 1000 rounds:
+Number of different measurement settings:  943
+Epsilon Bernstein for RE: 32.864162699877305
+Epsilon Chebyshev (tighter) for RE: 3.809416904986479
+Epsilon Chebyshev (tightest) for RE: 0.17113028614624706
+[Qibo 0.1.11|INFO|2026-07-27 10:43:05]: Using numpy backend on /CPU:0
+Shots: 1000 | RMSE: 0.097294 | Std: 0.006468
+[summary] find_setting calls in this allocation: 484 / 484 = 1.000000
+For 1484 rounds:
+Number of different measurement settings:  1341
+Epsilon Bernstein for RE: 26.360047341650066
+Epsilon Chebyshev (tighter) for RE: 3.1226395549366863
+Epsilon Chebyshev (tightest) for RE: 0.1374723488932004
+Shots: 1484 | RMSE: 0.079600 | Std: 0.005167
+[summary] find_setting calls in this allocation: 718 / 718 = 1.000000
+For 2202 rounds:
+Number of different measurement settings:  1900
+Epsilon Bernstein for RE: 21.25753459242214
+Epsilon Chebyshev (tighter) for RE: 2.5604590460540133
+Epsilon Chebyshev (tightest) for RE: 0.11172186304435723
+Shots: 2202 | RMSE: 0.073594 | Std: 0.005254
+[W update] round=3161  SIZING S_eff=1798.755  required=16568  W:3056->6112
+[summary] find_setting calls in this allocation: 1066 / 1066 = 1.000000
+For 3268 rounds:
+Number of different measurement settings:  2582
+Epsilon Bernstein for RE: 17.195986243752287
+Epsilon Chebyshev (tighter) for RE: 2.0988812722333443
+Epsilon Chebyshev (tightest) for RE: 0.09090117317272202
+Shots: 3268 | RMSE: 0.063107 | Std: 0.003811
+[summary] find_setting calls in this allocation: 1581 / 1581 = 1.000000
+For 4849 rounds:
+Number of different measurement settings:  3499
+Epsilon Bernstein for RE: 13.956315615943419
+Epsilon Chebyshev (tighter) for RE: 1.72263913379755
+Epsilon Chebyshev (tightest) for RE: 0.07405888433766813
+Shots: 4849 | RMSE: 0.051771 | Std: 0.002907
+[summary] find_setting calls in this allocation: 2347 / 2347 = 1.000000
+For 7196 rounds:
+Number of different measurement settings:  4630
+Epsilon Bernstein for RE: 11.344578130887232
+Epsilon Chebyshev (tighter) for RE: 1.4141882989337524
+Epsilon Chebyshev (tightest) for RE: 0.06039908455987802
+Shots: 7196 | RMSE: 0.042354 | Std: 0.002613
+[W update] round=9273  SIZING S_eff=2091.866  required=19267  W:6112->12224
+[summary] find_setting calls in this allocation: 3482 / 3482 = 1.000000
+For 10678 rounds:
+Number of different measurement settings:  5978
+Epsilon Bernstein for RE: 9.242154340562688
+Epsilon Chebyshev (tighter) for RE: 1.160900347182409
+Epsilon Chebyshev (tightest) for RE: 0.04946977762068772
+Shots: 10678 | RMSE: 0.034097 | Std: 0.002175
+[summary] find_setting calls in this allocation: 5167 / 5167 = 1.000000
+For 15845 rounds:
+Number of different measurement settings:  7620
+Epsilon Bernstein for RE: 7.541342997196144
+Epsilon Chebyshev (tighter) for RE: 0.9531097284449284
+Epsilon Chebyshev (tightest) for RE: 0.04056341518124213
+Shots: 15845 | RMSE: 0.027289 | Std: 0.001715
+[W update] round=21497  SIZING S_eff=2503.119  required=23055  W:12224->24448
+[summary] find_setting calls in this allocation: 7668 / 7668 = 1.000000
+For 23513 rounds:
+Number of different measurement settings:  9588
+Epsilon Bernstein for RE: 6.161469022736223
+Epsilon Chebyshev (tighter) for RE: 0.7821836698759657
+Epsilon Chebyshev (tightest) for RE: 0.03321450266438827
+Shots: 23513 | RMSE: 0.023804 | Std: 0.001798
+[summary] find_setting calls in this allocation: 11379 / 11379 = 1.000000
+For 34892 rounds:
+Number of different measurement settings:  11824
+Epsilon Bernstein for RE: 5.037292133231354
+Epsilon Chebyshev (tighter) for RE: 0.6420309720438396
+Epsilon Chebyshev (tightest) for RE: 0.027229971295071636
+Shots: 34892 | RMSE: 0.017831 | Std: 0.001245
+[W update] round=45945  SIZING S_eff=2775.529  required=25564  W:24448->48896
+[summary] find_setting calls in this allocation: 16886 / 16886 = 1.000000
+For 51778 rounds:
+Number of different measurement settings:  14376
+Epsilon Bernstein for RE: 4.120581550400792
+Epsilon Chebyshev (tighter) for RE: 0.5269264826811078
+Epsilon Chebyshev (tightest) for RE: 0.02229451097379573
+Shots: 51778 | RMSE: 0.015349 | Std: 0.001150
+[summary] find_setting calls in this allocation: 25057 / 25057 = 1.000000
+For 76835 rounds:
+Number of different measurement settings:  17241
+Epsilon Bernstein for RE: 3.388037700300765
+Epsilon Chebyshev (tighter) for RE: 0.43301184486839667
+Epsilon Chebyshev (tightest) for RE: 0.018763332258335586
+Shots: 76835 | RMSE: 0.012730 | Std: 0.000947
+[CHECKING start] round=94841  W=48896  S_eff=1821.301  required=16775
+[summary] find_setting calls in this allocation: 37183 / 37183 = 1.000000
+For 114018 rounds:
+Number of different measurement settings:  20066
+Epsilon Bernstein for RE: 2.7884105148412557
+Epsilon Chebyshev (tighter) for RE: 0.35573061729661
+Epsilon Chebyshev (tightest) for RE: 0.01586138562891375
+Shots: 114018 | RMSE: 0.011354 | Std: 0.000844
+[CHECK] round=143737  W=48896  TV_shared=0.227237<= 0.589102   new_mass=0.15443<= 0.351542   PASS
+[STEADY reached] round=143737  block_size=48896  unique=11841
+[summary] find_setting calls in this allocation: 29719 / 55176 = 0.538622
+For 169194 rounds:
+Number of different measurement settings:  22295
+Epsilon Bernstein for RE: 2.2888446583786646
+Epsilon Chebyshev (tighter) for RE: 0.29183172035959787
+Epsilon Chebyshev (tightest) for RE: 0.01307261105572824
+Shots: 169194 | RMSE: 0.009545 | Std: 0.000739
+[summary] find_setting calls in this allocation: 0 / 81879 = 0.000000
+For 251073 rounds:
+Number of different measurement settings:  22295
+Epsilon Bernstein for RE: 1.8781713656631152
+Epsilon Chebyshev (tighter) for RE: 0.23972908356083816
+Epsilon Chebyshev (tightest) for RE: 0.010818052266868034
+Shots: 251073 | RMSE: 0.007380 | Std: 0.000701
+[summary] find_setting calls in this allocation: 0 / 121503 = 0.000000
+For 372576 rounds:
+Number of different measurement settings:  22295
+Epsilon Bernstein for RE: 1.5412039832821247
+Epsilon Chebyshev (tighter) for RE: 0.19685288866747333
+Epsilon Chebyshev (tightest) for RE: 0.008928440509667184
+Shots: 372576 | RMSE: 0.006144 | Std: 0.000629
+[summary] find_setting calls in this allocation: 0 / 180301 = 0.000000
+For 552877 rounds:
+Number of different measurement settings:  22295
+Epsilon Bernstein for RE: 1.2652852630541505
+Epsilon Chebyshev (tighter) for RE: 0.16161409478536332
+Epsilon Chebyshev (tightest) for RE: 0.00736478315031881
+Shots: 552877 | RMSE: 0.005216 | Std: 0.000496
+[summary] find_setting calls in this allocation: 0 / 267556 = 0.000000
+For 820433 rounds:
+Number of different measurement settings:  22295
+Epsilon Bernstein for RE: 1.0382680269762041
+Epsilon Chebyshev (tighter) for RE: 0.13270302360752312
+Epsilon Chebyshev (tightest) for RE: 0.006060740053074533
+Shots: 820433 | RMSE: 0.004469 | Std: 0.000415
+[summary] find_setting calls in this allocation: 0 / 397035 = 0.000000
+For 1217468 rounds:
+Number of different measurement settings:  22295
+Epsilon Bernstein for RE: 0.852124680221413
+Epsilon Chebyshev (tighter) for RE: 0.10894385994379777
+Epsilon Chebyshev (tightest) for RE: 0.00498544141582427
+Shots: 1217468 | RMSE: 0.003582 | Std: 0.000362
+[summary] find_setting calls in this allocation: 0 / 589173 = 0.000000
+For 1806641 rounds:
+Number of different measurement settings:  22295
+Epsilon Bernstein for RE: 0.6993487553270741
+Epsilon Chebyshev (tighter) for RE: 0.08943356030492168
+Epsilon Chebyshev (tightest) for RE: 0.004097959987694734
+Shots: 1806641 | RMSE: 0.002882 | Std: 0.000344
+[summary] find_setting calls in this allocation: 0 / 874293 = 0.000000
+For 2680934 rounds:
+Number of different measurement settings:  22295
+Epsilon Bernstein for RE: 0.5739568012128171
+Epsilon Chebyshev (tighter) for RE: 0.07341906436323557
+Epsilon Chebyshev (tightest) for RE: 0.003366855892863047
+Shots: 2680934 | RMSE: 0.002553 | Std: 0.000315
+[summary] find_setting calls in this allocation: 0 / 1297393 = 0.000000
+For 3978327 rounds:
+Number of different measurement settings:  22295
+Epsilon Bernstein for RE: 0.4710767344478829
+Epsilon Chebyshev (tighter) for RE: 0.060268810333845096
+Epsilon Chebyshev (tightest) for RE: 0.0027655689757002397
+Shots: 3978327 | RMSE: 0.002132 | Std: 0.000266
+[summary] find_setting calls in this allocation: 0 / 1925243 = 0.000000
+For 5903570 rounds:
+Number of different measurement settings:  22295
+Epsilon Bernstein for RE: 0.386630601177323
+Epsilon Chebyshev (tighter) for RE: 0.04947710074305839
+Epsilon Chebyshev (tightest) for RE: 0.002271161990243864
+Shots: 5903570 | RMSE: 0.001724 | Std: 0.000203
+[summary] find_setting calls in this allocation: 0 / 2856933 = 0.000000
+For 8760503 rounds:
+Number of different measurement settings:  22295
+Epsilon Bernstein for RE: 0.31733616090978906
+Epsilon Chebyshev (tighter) for RE: 0.04061599292167691
+Epsilon Chebyshev (tightest) for RE: 0.0018649368962084148
+Shots: 8760503 | RMSE: 0.001360 | Std: 0.000158
+[summary] find_setting calls in this allocation: 0 / 4239497 = 0.000000
+For 13000000 rounds:
+Number of different measurement settings:  22295
+Epsilon Bernstein for RE: 0.2604699419726476
+Epsilon Chebyshev (tighter) for RE: 0.03334235101277165
+Epsilon Chebyshev (tightest) for RE: 0.0015312133914501874
+Shots: 13000000 | RMSE: 0.001108 | Std: 0.000131
+Elapsed time in seconds:  102093.33354306221
+Number of different measurement settings:  22295
+Number of hits for each observable:  [10291769   364328   364328 ...   651443   651443  2847157]
+
+
+For std pool (observables,w,method_1,eps,
+                                        total_rounds=n,is_overlapping=True,
+                                        commutativity_type="fc", # 'qwc', 'fc' or 'kc' 
+                                        informed_allocation=True,
+                                        allocation_objective="bernstein_l1", # 'variance' or 'bernstein_l1'
+                                        attempt_truncation=False,
+                                        rounding_strategy="marginal", # 'largest_fraction' or 'marginal'
+                                        md_execution_mode = "until-converged",
+                                        enable_pre_pruning = False,
+                                        md_gap_tol_rel=1e-6,
+                                        verbose=False)
+
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 1000 rounds:
+Number of different measurement settings:  286
+Epsilon Bernstein for RE: 38.94165337579611
+Epsilon Chebyshev (tighter) for RE: 3.7245230300043617
+Epsilon Chebyshev (tightest) for RE: 0.2408622097577491
+Results for RE | RMSE: 0.128373 | Std: 0.009864
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 1484 rounds:
+Number of different measurement settings:  286
+Epsilon Bernstein for RE: 31.05431152535961
+Epsilon Chebyshev (tighter) for RE: 3.0567029907230245
+Epsilon Chebyshev (tightest) for RE: 0.19685244997576234
+Results for RE | RMSE: 0.101230 | Std: 0.007527
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 2202 rounds:
+Number of different measurement settings:  286
+Epsilon Bernstein for RE: 24.919694514198163
+Epsilon Chebyshev (tighter) for RE: 2.509742963711162
+Epsilon Chebyshev (tightest) for RE: 0.1610083125763966
+Results for RE | RMSE: 0.097780 | Std: 0.007252
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 3268 rounds:
+Number of different measurement settings:  308
+Epsilon Bernstein for RE: 19.95983790541678
+Epsilon Chebyshev (tighter) for RE: 2.0663566191622094
+Epsilon Chebyshev (tightest) for RE: 0.1270608103702524
+Results for RE | RMSE: 0.074826 | Std: 0.006093
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 4849 rounds:
+Number of different measurement settings:  1255
+Epsilon Bernstein for RE: 13.403979990584583
+Epsilon Chebyshev (tighter) for RE: 1.6940845764063817
+Epsilon Chebyshev (tightest) for RE: 0.06459132219691227
+Results for RE | RMSE: 0.032443 | Std: 0.001852
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 7196 rounds:
+Number of different measurement settings:  1931
+Epsilon Bernstein for RE: 10.729188366443777
+Epsilon Chebyshev (tighter) for RE: 1.4303106164015968
+Epsilon Chebyshev (tightest) for RE: 0.052741201014197096
+Results for RE | RMSE: 0.029976 | Std: 0.001764
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 10678 rounds:
+Number of different measurement settings:  2679
+Epsilon Bernstein for RE: 8.730951806204148
+Epsilon Chebyshev (tighter) for RE: 1.1822279158530467
+Epsilon Chebyshev (tightest) for RE: 0.04347246796938655
+Results for RE | RMSE: 0.023576 | Std: 0.001386
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 15845 rounds:
+Number of different measurement settings:  3698
+Epsilon Bernstein for RE: 7.131134508509935
+Epsilon Chebyshev (tighter) for RE: 0.9729573317426153
+Epsilon Chebyshev (tightest) for RE: 0.035742255391259546
+Results for RE | RMSE: 0.018751 | Std: 0.001146
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 23513 rounds:
+Number of different measurement settings:  4867
+Epsilon Bernstein for RE: 5.826992011128851
+Epsilon Chebyshev (tighter) for RE: 0.8002293622601285
+Epsilon Chebyshev (tightest) for RE: 0.0294168314632753
+Results for RE | RMSE: 0.019416 | Std: 0.001210
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 34892 rounds:
+Number of different measurement settings:  6397
+Epsilon Bernstein for RE: 4.76023604280482
+Epsilon Chebyshev (tighter) for RE: 0.6570490523705831
+Epsilon Chebyshev (tightest) for RE: 0.023921932821600652
+Results for RE | RMSE: 0.013049 | Std: 0.000835
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 51778 rounds:
+Number of different measurement settings:  7774
+Epsilon Bernstein for RE: 3.8985151930863498
+Epsilon Chebyshev (tighter) for RE: 0.5387505330648467
+Epsilon Chebyshev (tightest) for RE: 0.01964989296257164
+Results for RE | RMSE: 0.010891 | Std: 0.000736
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 76835 rounds:
+Number of different measurement settings:  9048
+Epsilon Bernstein for RE: 3.1942916005017614
+Epsilon Chebyshev (tighter) for RE: 0.4418134840290339
+Epsilon Chebyshev (tightest) for RE: 0.016147054369979146
+Results for RE | RMSE: 0.009194 | Std: 0.000613
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 114018 rounds:
+Number of different measurement settings:  10218
+Epsilon Bernstein for RE: 2.6181826740013663
+Epsilon Chebyshev (tighter) for RE: 0.3624165626965625
+Epsilon Chebyshev (tightest) for RE: 0.013269018874648996
+Results for RE | RMSE: 0.008165 | Std: 0.000692
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 169194 rounds:
+Number of different measurement settings:  11285
+Epsilon Bernstein for RE: 2.1465844618190477
+Epsilon Chebyshev (tighter) for RE: 0.2973383727245373
+Epsilon Chebyshev (tightest) for RE: 0.010898159908821543
+Results for RE | RMSE: 0.005579 | Std: 0.000449
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 251073 rounds:
+Number of different measurement settings:  12120
+Epsilon Bernstein for RE: 1.7602900582157583
+Epsilon Chebyshev (tighter) for RE: 0.243985569896406
+Epsilon Chebyshev (tightest) for RE: 0.008951109342597479
+Results for RE | RMSE: 0.005544 | Std: 0.000409
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 372576 rounds:
+Number of different measurement settings:  12889
+Epsilon Bernstein for RE: 1.4437775900803156
+Epsilon Chebyshev (tighter) for RE: 0.20022262976856184
+Epsilon Chebyshev (tightest) for RE: 0.007350250021177774
+Results for RE | RMSE: 0.004106 | Std: 0.000289
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 552877 rounds:
+Number of different measurement settings:  13512
+Epsilon Bernstein for RE: 1.1843426116296925
+Epsilon Chebyshev (tighter) for RE: 0.1643252664525652
+Epsilon Chebyshev (tightest) for RE: 0.0060341724140576735
+Results for RE | RMSE: 0.003670 | Std: 0.000244
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 820433 rounds:
+Number of different measurement settings:  13975
+Epsilon Bernstein for RE: 0.971640895432125
+Epsilon Chebyshev (tighter) for RE: 0.1348661430158269
+Epsilon Chebyshev (tightest) for RE: 0.004954611980326143
+Results for RE | RMSE: 0.002894 | Std: 0.000174
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 1217468 rounds:
+Number of different measurement settings:  14342
+Epsilon Bernstein for RE: 0.7972196073443821
+Epsilon Chebyshev (tighter) for RE: 0.11069034665316063
+Epsilon Chebyshev (tightest) for RE: 0.004067730903520588
+Results for RE | RMSE: 0.002292 | Std: 0.000165
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 1806641 rounds:
+Number of different measurement settings:  14623
+Epsilon Bernstein for RE: 0.6541645637789547
+Epsilon Chebyshev (tighter) for RE: 0.09085164458095717
+Epsilon Chebyshev (tightest) for RE: 0.0033396418121777877
+Results for RE | RMSE: 0.001870 | Std: 0.000138
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 2680934 rounds:
+Number of different measurement settings:  14894
+Epsilon Bernstein for RE: 0.5368184967500113
+Epsilon Chebyshev (tighter) for RE: 0.07457160146088519
+Epsilon Chebyshev (tightest) for RE: 0.0027416861224256422
+Results for RE | RMSE: 0.001625 | Std: 0.000116
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 3978327 rounds:
+Number of different measurement settings:  15174
+Epsilon Bernstein for RE: 0.44054799698149616
+Epsilon Chebyshev (tighter) for RE: 0.06121073970330857
+Epsilon Chebyshev (tightest) for RE: 0.0022507385887214747
+Results for RE | RMSE: 0.001299 | Std: 0.000078
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 5903570 rounds:
+Number of different measurement settings:  15450
+Epsilon Bernstein for RE: 0.36156047143980513
+Epsilon Chebyshev (tighter) for RE: 0.05024499702100481
+Epsilon Chebyshev (tightest) for RE: 0.0018477454075298458
+Results for RE | RMSE: 0.001054 | Std: 0.000077
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 8760503 rounds:
+Number of different measurement settings:  15799
+Epsilon Bernstein for RE: 0.296747261000601
+Epsilon Chebyshev (tighter) for RE: 0.04124416833360133
+Epsilon Chebyshev (tightest) for RE: 0.0015168639698675053
+Results for RE | RMSE: 0.000845 | Std: 0.000048
+Updated N_reps_exp to 100. Cleared outcomes using clear_outcomes().
+For 13000000 rounds:
+Number of different measurement settings:  16201
+Epsilon Bernstein for RE: 0.24356100581457388
+Epsilon Chebyshev (tighter) for RE: 0.033855770089579164
+Epsilon Chebyshev (tightest) for RE: 0.0012451759568014606
+Results for RE | RMSE: 0.000738 | Std: 0.000050
+Elapsed time in seconds:  170032.61294674873
+

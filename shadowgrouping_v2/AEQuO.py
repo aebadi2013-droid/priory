@@ -1,101 +1,253 @@
-import numpy as np
-import itertools
-from shadowgrouping_v2.hamiltonian import int_to_char
-from shadowgrouping_v2.measurement_schemes import Shadow_Grouping
+import numpy as np, itertools
+from shadowgrouping.poolgenerators import Shadow_Grouping_FC
+from shadowgrouping_v2.shadowgrouping_my_dev.full_commutativity import (
+    _GF2LinearBasis,
+    _export_basis_compact,
+    in_span_batch_numba,
+)
+from shadowgrouping_v2.shadowgrouping_my_dev.qubit_wise_commutativity import sample_obs_batch_from_setting_numba
+from shadowgrouping_v2.shadowgrouping_my_dev.helper_functions import encode_setting_token
+
+int_to_char = {0: 'I', 1: 'X', 2: 'Y', 3: 'Z'}
 
 # Source code has been sourced from https://github.com/AndrewJena/VQE_measurement_optimization
 # The following class has been modified (and a few hidden member functions added by promoting helper functions) to be compatible with the rest of this API
 # Compatability with the original source code has been verified
 # No helper function below has been modified
 
-class AEQuO(Shadow_Grouping):
-    """ Greedy bucket-filling algorithm, explained in https://arxiv.org/abs/2110.15339. Adapted from the corresponding repo.
-        Algorithm parameters:
-        adaptiveness_L (int, >=0): degree of adaptiveness to measurement outcomes. A value of 0 means no adaptivity, larger values increase it.
-        interval_isometry_l (float, >=0): A value of 0 signifies equidistant updates, larger values skew this towards more updates early on.
-        budget (int, >=0): Predefined measurement budget. A value of zero means non-adaptive allocation and overwrites the other parameters.
+class AEQuO(Shadow_Grouping_FC):
     """
-    
-    def __init__(self,observables,weights,offset,adaptiveness_L=0,interval_skewness_l=0,budget=0):
-        super().__init__(observables,weights,0.1,None) # Third input is epsilon (which is not relevant) and fourth is weight function (also not relevant)
-        # init formatting for AEQuO
+    Greedy AEQuO bucket-filling algorithm with QWC or FC measurement groups.
+
+    The Bayesian allocation logic follows the original AEQuO implementation.
+    The commutativity model affects only the compatibility graph, physical
+    setting description, hit harvesting, and outcome decoding.
+
+    Parameters
+    ----------
+    observables, weights, offset
+        Hamiltonian Pauli strings, coefficients, and identity offset.
+
+    adaptiveness_L : int, optional
+        AEQuO adaptiveness parameter.
+
+    interval_skewness_l : float, optional
+        AEQuO update-schedule skewness parameter.
+
+    budget : int, optional
+        Predefined number of measurement rounds.
+
+    commutativity_type : {"qwc", "fc"}, optional
+        Compatibility relation used to construct the AEQuO LDF clique
+        partition. QWC is the backward-compatible default.
+
+    save_scheme : bool, optional
+        Retain the round-by-round ShadowGrouping-style setting history.
+
+    compute_N_hits_pairs : bool, optional
+        Update the full harvested-observable pair-count matrix each round.
+
+    Notes
+    -----
+    ``self.cliques`` retains AEQuO's identity-inclusive, non-overlapping LDF
+    partition and continues to drive ``S`` and ``V``. Joint +/-1 outcome
+    counts are stored in dense integer tensors rather than an object array of
+    Python dictionaries.
+    ``self.measurement_settings_pool`` stores the corresponding physical QWC or
+    FC setting records. Their harvested hit sets may overlap.
+
+    ``receive_outcomes`` accepts proposal-ordered feedback in batches. In FC
+    mode, the optimized path accepts decoded observable-value matrices together
+    with their setting tokens, observable indices, and proposal positions.
+    ``receive_outcome`` remains available as a backward-compatible one-outcome
+    wrapper. Bayesian formulas and checkpoint rules are unchanged.
+    """
+
+    def __init__(self, observables, weights, offset,
+                 adaptiveness_L=0, interval_skewness_l=0, budget=0,
+                 commutativity_type="qwc", save_scheme=False,
+                 compute_N_hits_pairs=True):
+        super().__init__(
+            observables,
+            weights,
+            epsilon=0.01,
+            weight_function=None,
+            save_scheme=save_scheme,
+            handle_ties=True,
+            compute_N_hits_pairs=compute_N_hits_pairs,
+            commutativity_type=commutativity_type,
+        )
+        #initial_ordering_strategy="coefficient",
+        self.V = np.zeros((self.num_obs + 1, self.num_obs + 1), dtype=float)
         self.offset = offset
-        self.__observables_to_AEQuO_list()  # Just an helper function that turns the ShadowGrouping format to the one digestible by AEQuO. 
-        assert isinstance(adaptiveness_L,int), "adaptiveness_L-value has to be integer."
-        assert adaptiveness_L >= 0, "Adaptiveness_L-value has to non-negative, but was {}.".format(adaptiveness_L)
-        assert interval_skewness_l >= 0, "Interval_skewness_l-value has to non-negative, but was {}.".format(interval_skewness_l)
-        assert isinstance(budget,int), "budget-value has to be integer."
-        assert budget >= 0, "budget-value has to be non-negative, but was {}.".format(budget)
-        self.shots = budget # New variable exclusive of AEQuO class
-        self.L = adaptiveness_L + 1 if self.shots > 0 else 1 # New variable exclusive of AEQuO class
-        self.l = interval_skewness_l # New variable exclusive of AEQuO class
-        self.update_steps = Ll_updates(self.L,self.l,self.shots) # New variable exclusive of AEQuO class
+        self.__observables_to_AEQuO_list()
+
+        assert isinstance(adaptiveness_L, int), \
+            "adaptiveness_L-value has to be integer."
+        assert adaptiveness_L >= 0, \
+            f"adaptiveness_L-value has to non-negative, but was {adaptiveness_L}."
+        assert interval_skewness_l >= 0, \
+            f"interval_skewness_l-value has to non-negative, but was {interval_skewness_l}."
+        assert isinstance(budget, int), "budget-value has to be integer."
+        assert budget >= 0, \
+            f"budget-value has to be non-negative, but was {budget}."
+
+        self.shots = budget
+        self.L = adaptiveness_L + 1 if self.shots > 0 else 1
+        self.l = interval_skewness_l
+        self.update_steps = Ll_updates(self.L, self.l, self.shots)
+
         self.is_adaptive = self.L > 1
         self.is_sampling = self.is_adaptive
-        
-        # self.outcome_dict stores counts of bit pairs corresponding to outcomes of pairs of simultaneously measured observables
-        # convention: AEQuO takes the identity as well, so we have to count it in self.num_obs
-        self.outcome_dict = np.array([[{(1,1):0,(1,-1):0,(-1,1):0,(-1,-1):0} for a1 in range(self.num_obs+1)] for a0 in range(self.num_obs+1)])
-        # partition the commutativity graph using largest-degree first algorithm
-        self.cliques = LDF(qubitwise_commutation_graph(self.paulis))
-        # initialize variance estimates - these are stored as self.V internally
-        self.sampled_cliques = []
-        self.sampled_cliques_since_update = []
-        self.outcomes_since_update = []
-        self.update_variance_estimate()
-        # get two independent iterators over these cliques
-        cliques1,cliques2 = itertools.tee(self.cliques,2)
-        # speed-up tricks for non-overlapping cliques or non-adaptive settings
-        # Second option (i.e., 'else') is standard for AEQuO: we allow for overlapping cliques and adaptivity
-        if not self.update_steps&set(range(1,self.shots)) and not any(set(aa1)&set(aa2) for aa1,aa2 in itertools.product(cliques1,cliques2) if not aa1==aa2):
-            # self.setting_function is the generator of a new clique (i.e., measurement setting)
-            self.setting_function = self.non_overlapping_bayes_min_var
-            # helper arrays
-            self.clique_counts = [0]*len(self.cliques)
-            self.clique_stds = [np.sqrt(self.V[clique][:,clique].sum()) for clique in self.cliques]
+
+        # Exact sufficient statistics for the four joint +/-1 outcomes of
+        # every ordered AEQuO-vertex pair. Axis values 0 and 1 represent +1
+        # and -1, respectively. The pending tensor contains feedback received
+        # since the latest Bayesian checkpoint.
+        self.outcome_counts = self._empty_outcome_counts()
+        self.pending_outcome_counts = self._empty_outcome_counts()
+        self.supports_batched_feedback = True
+
+        if self.commutativity_type == "qwc":
+            self.compatibility_graph = qubitwise_commutation_graph(self.paulis)
         else:
-            # self.setting_function is the generator of a new clique (i.e., measurement setting)
-            self.setting_function = self.overlapping_bayes_min_var
-        self.S = np.zeros((self.num_obs+1,self.num_obs+1),dtype=int) # N_obs x N_obs
-        #self.Ones = [np.ones((i,i),dtype=int) for i in range(self.num_obs+1+1)] # increasing arrays of size i x i for i = 1, ... , N_obs
-        self.index_set = set(range(self.num_obs+1))
-        self.update_steps = np.sort(list(self.update_steps))[1:]  # exclude the "0"-entry
-        
-        return
-        
-    def reset(self):
-        super().reset()
-        self.outcome_dict = np.array([[{(1,1):0,(1,-1):0,(-1,1):0,(-1,-1):0} for a1 in range(self.num_obs+1)] for a0 in range(self.num_obs+1)])
-        self.S = np.zeros((self.num_obs+1,self.num_obs+1),dtype=int) # N_obs x N_obs
-        self.index_set = set(range(self.num_obs+1))
+            self.compatibility_graph = full_commutation_graph(self.paulis)
+
+        self.cliques = LDF(self.compatibility_graph)
+        self.measurement_settings_pool = []
+        self.clique_setting_records = {}
+        self._build_measurement_settings_pool()
+        self.current_setting_record = None
+
         self.sampled_cliques = []
         self.sampled_cliques_since_update = []
         self.outcomes_since_update = []
         self.update_variance_estimate()
+
+        cliques1, cliques2 = itertools.tee(self.cliques, 2)
+
+        if (not self.update_steps & set(range(1, self.shots))) and not any(
+            set(aa1) & set(aa2)
+            for aa1, aa2 in itertools.product(cliques1, cliques2)
+            if aa1 != aa2
+        ):
+            self.setting_function = self.non_overlapping_bayes_min_var
+            self.clique_counts = [0] * len(self.cliques)
+            self.clique_stds = [
+                np.sqrt(self.V[clique][:, clique].sum())
+                for clique in self.cliques
+            ]
+        else:
+            self.setting_function = self.overlapping_bayes_min_var
+
+        self.S = np.zeros((self.num_obs + 1, self.num_obs + 1), dtype=int)
+        self.index_set = set(range(self.num_obs + 1))
+        self.update_steps = np.sort(list(self.update_steps))[1:]
+
+        # AEQuO-specific order tracking used by Energy_estimator to restore the
+        # chronological order after identical setting tokens are aggregated.
+        self.order = {}
+
+        # Retain this historical AEQuO assignment even though the parent class
+        # already owns the same attribute.
+        self.settings_dict = {}
+
+        self.scheme_params.update({
+            "adaptiveness_L": adaptiveness_L,
+            "interval_skewness_l": interval_skewness_l,
+            "budget": budget,
+        })
+
+    def _empty_outcome_counts(self):
+        """Return the zeroed identity-inclusive joint-outcome count tensor."""
+        p = self.num_obs + 1
+        return np.zeros((p, p, 2, 2), dtype=np.int64)
+
+    @property
+    def outcome_dict(self):
+        """
+        Materialize a backward-compatible snapshot of the legacy counters.
+
+        The adaptive implementation itself never constructs this object array.
+        Mutating the returned dictionaries does not alter ``outcome_counts``.
+        """
+        return outcome_counts_to_legacy_dict_array(self.outcome_counts)
+
+    def reset(self):
+        """Reset execution and Bayesian state while retaining graph/clique metadata."""
+        super().reset()
+
+        self.outcome_counts = self._empty_outcome_counts()
+        self.pending_outcome_counts = self._empty_outcome_counts()
+        self.V = np.zeros((self.num_obs + 1, self.num_obs + 1), dtype=float)
+        self.S = np.zeros((self.num_obs + 1, self.num_obs + 1), dtype=int)
+        self.index_set = set(range(self.num_obs + 1))
+
+        self.sampled_cliques = []
+        self.sampled_cliques_since_update = []
+        self.outcomes_since_update = []
+        self.current_setting_record = None
+        self.order = {}
+        self.update_variance_estimate()
+
         if self.setting_function == self.non_overlapping_bayes_min_var:
-            self.clique_counts = [0]*len(self.cliques)
-            self.clique_stds = [np.sqrt(self.V[clique][:,clique].sum()) for clique in self.cliques]
-        return
-    
+            self.clique_counts = [0] * len(self.cliques)
+            self.clique_stds = [
+                np.sqrt(self.V[clique][:, clique].sum())
+                for clique in self.cliques
+            ]
+
     def find_setting(self):
+        """Select one AEQuO clique, register its QWC/FC setting, and return its hit set."""
         if len(self.sampled_cliques) == self.shots:
-            print("Warning! Starting to inquire more samples than predefined measurement budget of {} for this class.".format(self.shots))
-            print("Further measurement settings can be accessed, however, no update step for the variance estimates is performed.")
-        if len(self.sampled_cliques) in self.update_steps and len(self.sampled_cliques) > 0:
-            # update variance estimate accordingly
+            print(
+                "Warning! Starting to inquire more samples than predefined "
+                f"measurement budget of {self.shots} for this class."
+            )
+            print(
+                "Further measurement settings can be accessed, however, no "
+                "update step for the variance estimates is performed."
+            )
+
+        if (
+            len(self.sampled_cliques) in self.update_steps
+            and len(self.sampled_cliques) > 0
+        ):
             self.update_variance_estimate()
             self.sampled_cliques_since_update = []
             self.outcomes_since_update = []
-        
-        clique = self.setting_function() # just sampling one clique from the fixed self.cliques
-        # transform into Pauli string for compatibility with parent class
-        setting, clique = self._clique_to_Pauli_observable(clique)
-        # update class counters
-        self.N_hits[clique] += 1
-        return setting
+            # ``update_variance_estimate`` normally commits and clears this
+            # tensor. Clearing again also preserves the historical behavior of
+            # discarding incomplete checkpoint feedback after a skipped update.
+            self.pending_outcome_counts.fill(0)
+
+        # setting_function retains its original responsibility for AEQuO's
+        # Bayesian sample-count state and sampled-clique histories.
+        clique = self.setting_function()
+        key = tuple(map(int, clique))
+
+        if key not in self.clique_setting_records:
+            raise KeyError(f"No measurement-setting record found for clique {clique}.")
+
+        record = self.clique_setting_records[key]
+        setting_indices = self._register_setting(
+            record["setting_indices"],
+            selected_mask=None,
+            setting_token=record["setting_token"],
+        )
+
+        self.last_generator_indices = record["generator_indices"].copy()
+        qwc_setting = record["qwc_setting"]
+        self.last_qwc_setting = (
+            None if qwc_setting is None else qwc_setting.copy()
+        )
+        self.current_setting_record = record
+        info = {}
+        return setting_indices , info
         
     def overlapping_bayes_min_var(self):
-        # The standard version of the setting_function, i.e., the function that samples a new setting (a.k.a. clique) from a fixed set
+        # The standard version of the setting_function, i.e., the function that 
+        # samples a new setting (a.k.a. clique) from a fixed set
         S1 = self.S + 1 # Adding one sample to every single pair of observables
         s = 1/(self.S.diagonal()|(self.S.diagonal()==0))
         s1 = 1/S1.diagonal()
@@ -104,7 +256,8 @@ class AEQuO(Shadow_Grouping):
         V1 = self.V*(self.S*s*s[:,None] - S1*s1*s1[:,None]) # Variances
         V2 = 2*self.V*(self.S*s*s[:,None] - self.S*s*s1[:,None]) # Co-variances
         cliques1 = iter(self.cliques) # this is an iterator of self.cliques
-        # The next line is where AEQuO "prioritizes cliques that are statistically likely to have bigger contributions to the error" (p. 5 of paper)
+        # The next line is where AEQuO "prioritizes cliques that are 
+        # statistically likely to have bigger contributions to the error" (p. 5 of paper)
         clique = sorted(max(cliques1,key=lambda xx : V1[xx][:,xx].sum()+V2[xx][:,list(self.index_set.difference(xx))].sum()))
         self.sampled_cliques.append(clique)
         self.sampled_cliques_since_update.append(clique)
@@ -128,30 +281,378 @@ class AEQuO(Shadow_Grouping):
         
         return clique
     
-    def update_variance_estimate(self,update_V=True):
-        """ Updates variance graph calculated with Bayesian estimates. """
-        if len(self.sampled_cliques_since_update) != len(self.outcomes_since_update):
+    def update_variance_estimate(self, update_V=True):
+        """
+        Commit pending sufficient statistics and update the Bayesian graph.
+
+        The integer counts are exactly those accumulated by the former nested
+        dictionary loop. Only their storage and evaluation are vectorized.
+        """
+        num_allocated = len(self.sampled_cliques_since_update)
+        num_received = len(self.outcomes_since_update)
+
+        if num_allocated != num_received:
             print("Warning at step {}!".format(len(self.sampled_cliques)))
-            print("Not every allocated clique (there are {} allocations since last update and {} outcomes right now) received an outcome.".format(len(self.sampled_cliques_since_update),len(self.outcomes_since_update)))
+            print(
+                "Not every allocated clique (there are {} allocations since "
+                "last update and {} outcomes right now) received an outcome."
+                .format(num_allocated, num_received)
+            )
             print("Skipping the update.")
-        else:
-            # preprocessing: updated array of measurement outcome counts
-            for clique,outcome in zip(self.sampled_cliques_since_update,self.outcomes_since_update):
-                for (a0,c0),(a1,c1) in itertools.product(zip(clique,outcome),repeat=2):
-                    self.outcome_dict[a0,a1][(c0,c1)] += 1
-            # update variance graph
-            if update_V:
-                self.V = bayes_variance_graph(self.outcome_dict,self.coeffs).adj
+            return
+
+        self.outcome_counts += self.pending_outcome_counts
+        self.pending_outcome_counts.fill(0)
+
+        if update_V:
+            self.V = bayes_variance_graph(
+                self.outcome_counts,
+                self.coeffs,
+            ).adj
+
         return
-    
-    def receive_outcome(self,outcome):
-        """ Convenience function to obtain the outcome of the previously chosen clique. """
-        if len(self.sampled_cliques_since_update) == len(self.outcomes_since_update):
-            print("Warning at step {}! Trying to feed an outcome for which no clique has been allocated yet.".format(len(self.sampled_cliques)))
-            print("Given outcome has not been incorporated into scheme.")
+
+    @staticmethod
+    def _validate_clique_outcome_matrix(clique, values):
+        """Validate and return an ``(num_rounds, clique_size)`` int8 array."""
+        clique = np.asarray(clique, dtype=np.int32).reshape(-1)
+        values = np.asarray(values)
+
+        if values.ndim == 1:
+            values = values.reshape(1, -1)
+
+        if values.ndim != 2 or values.shape[1] != clique.size:
+            raise ValueError(
+                "Clique outcomes must have shape (num_rounds, clique_size); "
+                f"expected second dimension {clique.size}, got "
+                f"{values.shape}."
+            )
+
+        if not np.all((values == 1) | (values == -1)):
+            raise ValueError("AEQuO clique outcomes must contain only +/-1.")
+
+        return values.astype(np.int8, copy=False)
+
+    @staticmethod
+    def _accumulate_clique_outcome_counts(target, clique, values):
+        """Add one clique's batched four-outcome counts to ``target``."""
+        clique = np.asarray(clique, dtype=np.intp).reshape(-1)
+        values = AEQuO._validate_clique_outcome_matrix(clique, values)
+
+        positive = (values == 1).astype(np.int64)
+        negative = 1 - positive
+
+        counts_pp = positive.T @ positive
+        counts_pm = positive.T @ negative
+        counts_mp = negative.T @ positive
+        counts_mm = negative.T @ negative
+
+        rows, cols = np.ix_(clique, clique)
+        target[rows, cols, 0, 0] += counts_pp
+        target[rows, cols, 0, 1] += counts_pm
+        target[rows, cols, 1, 0] += counts_mp
+        target[rows, cols, 1, 1] += counts_mm
+
+    def _process_qwc_outcomes_batch(self, clique, raw_outcomes):
+        """Decode many raw QWC samples for one AEQuO clique at once."""
+        raw_outcomes = np.asarray(raw_outcomes)
+        if raw_outcomes.ndim == 1:
+            raw_outcomes = raw_outcomes.reshape(1, -1)
+
+        if raw_outcomes.ndim != 2 or raw_outcomes.shape[1] != self.num_qubits:
+            raise ValueError(
+                "Batched QWC outcomes must have shape "
+                f"(num_rounds, {self.num_qubits}), got "
+                f"{raw_outcomes.shape}."
+            )
+        if not np.all((raw_outcomes == 1) | (raw_outcomes == -1)):
+            raise ValueError("QWC AEQuO outcomes must contain only +/-1.")
+
+        includes_identity, clique_obs = self._translate_aequo_clique(clique)
+        num_rounds = raw_outcomes.shape[0]
+        num_columns = clique_obs.size + int(includes_identity)
+        values = np.empty((num_rounds, num_columns), dtype=np.int8)
+
+        column = 0
+        if includes_identity:
+            values[:, 0] = 1
+            column = 1
+
+        for obs_idx in clique_obs:
+            support = self.obs[int(obs_idx)] != 0
+            values[:, column] = np.prod(
+                raw_outcomes[:, support],
+                axis=1,
+            ).astype(np.int8, copy=False)
+            column += 1
+
+        return values
+
+    def _process_fc_outcomes_batch(self, clique, setting_token, obs_ids,
+                                   decoded_values):
+        """Extract one clique's columns from a decoded FC sample matrix."""
+        key = tuple(map(int, clique))
+        if key not in self.clique_setting_records:
+            raise KeyError(f"No setting record found for AEQuO clique {clique}.")
+
+        record = self.clique_setting_records[key]
+        if setting_token != record["setting_token"]:
+            raise ValueError(
+                "FC batch token does not match the setting generated for "
+                f"AEQuO clique {clique}."
+            )
+
+        obs_ids = np.asarray(obs_ids, dtype=np.int32).reshape(-1)
+        decoded_values = np.asarray(decoded_values)
+        if decoded_values.ndim == 1:
+            decoded_values = decoded_values.reshape(1, -1)
+
+        if decoded_values.ndim != 2 or decoded_values.shape[1] != obs_ids.size:
+            raise ValueError(
+                "FC decoded batch must have shape "
+                "(num_rounds, len(obs_ids))."
+            )
+        if np.unique(obs_ids).size != obs_ids.size:
+            raise ValueError("FC outcome payload contains duplicate obs_ids.")
+        if np.any(obs_ids < 0) or np.any(obs_ids >= self.num_obs):
+            raise IndexError(
+                "FC outcome payload contains an observable index outside "
+                f"[0, {self.num_obs})."
+            )
+        if not np.all((decoded_values == 1) | (decoded_values == -1)):
+            raise ValueError("FC decoded observable values must contain only +/-1.")
+
+        column_by_obs = {
+            int(obs_idx): column
+            for column, obs_idx in enumerate(obs_ids)
+        }
+        clique_arr = np.asarray(clique, dtype=np.int32).reshape(-1)
+        values = np.empty(
+            (decoded_values.shape[0], clique_arr.size),
+            dtype=np.int8,
+        )
+
+        for column, vertex in enumerate(clique_arr):
+            vertex = int(vertex)
+            if vertex == 0:
+                values[:, column] = 1
+                continue
+
+            obs_idx = vertex - 1
+            if obs_idx not in column_by_obs:
+                raise KeyError(
+                    "FC outcome batch is missing observable index "
+                    f"{obs_idx}, required by AEQuO clique {clique}."
+                )
+            values[:, column] = decoded_values[:, column_by_obs[obs_idx]]
+
+        return values
+
+    def _commit_normalized_feedback(self, cliques, normalized_outcomes):
+        """Atomically append normalized outcomes and their tensor counts."""
+        delta = self._empty_outcome_counts()
+        grouped = {}
+
+        for position, (clique, values) in enumerate(
+            zip(cliques, normalized_outcomes)
+        ):
+            if values is None:
+                raise RuntimeError(
+                    "At least one batched adaptive outcome was not decoded."
+                )
+            key = tuple(map(int, clique))
+            grouped.setdefault(key, []).append(position)
+
+        validated = [None] * len(normalized_outcomes)
+        for key, positions in grouped.items():
+            clique = np.asarray(key, dtype=np.int32)
+            matrix = self._validate_clique_outcome_matrix(
+                clique,
+                np.asarray([normalized_outcomes[p] for p in positions]),
+            )
+            self._accumulate_clique_outcome_counts(delta, clique, matrix)
+            for row, position in enumerate(positions):
+                validated[position] = matrix[row].astype(int).tolist()
+
+        self.pending_outcome_counts += delta
+        self.outcomes_since_update.extend(validated)
+
+    def _receive_legacy_outcomes(self, outcomes):
+        """Batch legacy raw-QWC or per-round FC feedback in proposal order."""
+        if self.commutativity_type == "qwc":
+            raw = np.asarray(outcomes)
+            if raw.ndim == 1:
+                raw = raw.reshape(1, -1)
+            num_new = raw.shape[0]
         else:
-            outcome = self._process_outcome(self.sampled_cliques_since_update[len(self.outcomes_since_update)],outcome)
-            self.outcomes_since_update.append(outcome)
+            outcomes = list(outcomes)
+            num_new = len(outcomes)
+
+        start = len(self.outcomes_since_update)
+        stop = start + num_new
+        if stop > len(self.sampled_cliques_since_update):
+            print(
+                "Warning at step {}! Trying to feed outcomes for which no "
+                "cliques have been allocated yet."
+                .format(len(self.sampled_cliques))
+            )
+            print("Given outcomes have not been incorporated into scheme.")
+            return
+
+        cliques = self.sampled_cliques_since_update[start:stop]
+        normalized = [None] * num_new
+        groups = {}
+        for position, clique in enumerate(cliques):
+            groups.setdefault(tuple(map(int, clique)), []).append(position)
+
+        for key, positions in groups.items():
+            clique = np.asarray(key, dtype=np.int32)
+            if self.commutativity_type == "qwc":
+                matrix = self._process_qwc_outcomes_batch(
+                    clique,
+                    raw[positions],
+                )
+                for row, position in enumerate(positions):
+                    normalized[position] = matrix[row]
+            else:
+                for position in positions:
+                    normalized[position] = self._process_fc_outcome(
+                        clique,
+                        outcomes[position],
+                    )
+
+        self._commit_normalized_feedback(cliques, normalized)
+
+    def _receive_setting_batches(self, payload):
+        """Receive QWC or FC setting batches with proposal-order positions."""
+        if payload.get("format") != "setting_batches":
+            raise ValueError("Unsupported batched AEQuO feedback format.")
+
+        num_new = int(payload.get("num_outcomes", -1))
+        if num_new < 0:
+            raise ValueError("Batched feedback requires nonnegative num_outcomes.")
+
+        start = len(self.outcomes_since_update)
+        stop = start + num_new
+        if stop > len(self.sampled_cliques_since_update):
+            print(
+                "Warning at step {}! Trying to feed outcomes for which no "
+                "cliques have been allocated yet."
+                .format(len(self.sampled_cliques))
+            )
+            print("Given outcomes have not been incorporated into scheme.")
+            return
+
+        cliques = self.sampled_cliques_since_update[start:stop]
+        normalized = [None] * num_new
+        seen_positions = np.zeros(num_new, dtype=bool)
+
+        for batch in payload.get("batches", []):
+            positions = np.asarray(
+                batch.get("positions", []),
+                dtype=np.int64,
+            ).reshape(-1)
+            values = np.asarray(batch.get("values", []))
+
+            if values.ndim == 1:
+                values = values.reshape(1, -1)
+            if values.ndim != 2 or values.shape[0] != positions.size:
+                raise ValueError(
+                    "Every feedback batch must provide one values row per "
+                    "proposal-order position."
+                )
+            if np.any(positions < 0) or np.any(positions >= num_new):
+                raise IndexError(
+                    "Batched feedback contains an out-of-range proposal "
+                    "position."
+                )
+            if np.unique(positions).size != positions.size:
+                raise ValueError(
+                    "A feedback batch contains duplicate proposal positions."
+                )
+            if np.any(seen_positions[positions]):
+                raise ValueError(
+                    "A proposal position appears in more than one feedback "
+                    "batch."
+                )
+
+            groups = {}
+            for row, position in enumerate(positions):
+                key = tuple(map(int, cliques[int(position)]))
+                groups.setdefault(key, []).append((row, int(position)))
+
+            batch_format = batch.get("format")
+            for key, row_positions in groups.items():
+                clique = np.asarray(key, dtype=np.int32)
+                rows = [item[0] for item in row_positions]
+
+                if batch_format == "raw_qubit_values_batch":
+                    if self.commutativity_type != "qwc":
+                        raise ValueError(
+                            "Raw-qubit feedback batches are valid only for "
+                            "QWC AEQuO."
+                        )
+                    record = self.clique_setting_records.get(key)
+                    if record is None:
+                        raise KeyError(
+                            f"No setting record found for AEQuO clique {clique}."
+                        )
+                    if batch.get("setting_token") != record["setting_token"]:
+                        raise ValueError(
+                            "QWC batch token does not match the setting "
+                            f"generated for AEQuO clique {clique}."
+                        )
+                    matrix = self._process_qwc_outcomes_batch(
+                        clique,
+                        values[rows],
+                    )
+                elif batch_format == "observable_values_batch":
+                    if self.commutativity_type != "fc":
+                        raise ValueError(
+                            "Decoded-observable feedback batches are valid "
+                            "only for FC AEQuO."
+                        )
+                    matrix = self._process_fc_outcomes_batch(
+                        clique,
+                        batch.get("setting_token"),
+                        batch.get("obs_ids", []),
+                        values[rows],
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported feedback batch format {batch_format!r}."
+                    )
+
+                for local_row, (_, position) in enumerate(row_positions):
+                    normalized[position] = matrix[local_row]
+
+            seen_positions[positions] = True
+
+        if num_new and not np.all(seen_positions):
+            missing = np.flatnonzero(~seen_positions)
+            raise RuntimeError(
+                "Batched feedback is missing proposal positions "
+                f"{missing.tolist()}."
+            )
+
+        self._commit_normalized_feedback(cliques, normalized)
+
+    def receive_outcomes(self, outcomes):
+        """
+        Receive several adaptive outcomes without changing their chronology.
+
+        ``outcomes`` may be a legacy proposal-ordered sequence or a
+        ``format='setting_batches'`` payload produced by ``Energy_estimator``.
+        """
+        if isinstance(outcomes, dict) and outcomes.get("format") == "setting_batches":
+            self._receive_setting_batches(outcomes)
+        else:
+            self._receive_legacy_outcomes(outcomes)
+        return
+
+    def receive_outcome(self, outcome):
+        """Backward-compatible wrapper for one adaptive outcome."""
+        self.receive_outcomes([outcome])
         return
         
     def __observables_to_AEQuO_list(self):
@@ -166,38 +667,326 @@ class AEQuO(Shadow_Grouping):
         self.coeffs = np.hstack(([self.offset],self.w))
         return
 
-    def _clique_to_Pauli_observable(self,clique):
-        """ Helper function that returns the sampled clique to a Pauli string (since qubit-wise commutativity is assumed).
-            Performs a check whether this string actually commutes with all observables within the sampled clique.
-            Returns a valid measurement setting as required for the parent class and the altered clique for further internal usage.
+    @staticmethod
+    def _translate_aequo_clique(clique):
         """
-        # the commutativity graph includes the identity term - we can simply drop it
-        clique = np.array(clique[1:]) - 1 if clique[0] == 0 else np.array(clique) - 1
-        clique_members = self.obs[clique]
-        setting = np.max(clique_members, axis=0)
-        filtered = setting != 0
-        clique_members[clique_members==0] = 4 # throw away identities
-        # Now, np.min(clique_members,axis=0) has to match up with its np.max(...) except where setting == 0
-        double_check = np.min(clique_members, axis=0)
-        assert np.allclose(setting[filtered],double_check[filtered]), "The clique {} does not allow for a qubit-wise commutativity-compatible measurement setting.".format(clique)
-        return setting, clique
+        Remove AEQuO's artificial identity vertex and translate the remaining
+        vertices to zero-based indices into ``self.obs``.
+        """
+        clique_arr = np.asarray(clique, dtype=np.int64).reshape(-1)
+        includes_identity = bool(np.any(clique_arr == 0))
+        obs_indices = clique_arr[clique_arr != 0] - 1
+        return includes_identity, obs_indices.astype(np.int32, copy=False)
+
+    def _make_setting_record(self, clique, setting_indices, qwc_setting,
+                             generator_indices):
+        """Construct one immutable-by-convention AEQuO/ShadowGrouping record."""
+        clique_arr = np.asarray(clique, dtype=np.int32).reshape(-1).copy()
+        includes_identity, clique_obs = self._translate_aequo_clique(clique_arr)
+
+        setting_indices = np.asarray(
+            setting_indices,
+            dtype=np.int32,
+        ).reshape(-1)
+        setting_indices = np.unique(setting_indices)
+        setting_indices.sort()
+
+        if setting_indices.size == 0:
+            raise RuntimeError(
+                f"AEQuO clique {clique_arr.tolist()} generated an empty setting."
+            )
+
+        if (
+            np.any(setting_indices < 0)
+            or np.any(setting_indices >= self.num_obs)
+        ):
+            raise IndexError(
+                "A generated AEQuO setting contains an observable index "
+                f"outside [0, {self.num_obs})."
+            )
+
+        if not np.all(np.isin(clique_obs, setting_indices)):
+            raise RuntimeError(
+                "A generated setting does not contain every nonidentity member "
+                f"of AEQuO clique {clique_arr.tolist()}."
+            )
+
+        generator_indices = np.asarray(
+            generator_indices,
+            dtype=np.int32,
+        ).reshape(-1).copy()
+
+        if (
+            np.any(generator_indices < 0)
+            or np.any(generator_indices >= self.num_obs)
+        ):
+            raise IndexError(
+                "A generated AEQuO setting contains a generator index outside "
+                f"[0, {self.num_obs})."
+            )
+
+        if qwc_setting is not None:
+            qwc_setting = np.asarray(
+                qwc_setting,
+                dtype=np.int8,
+            ).reshape(-1).copy()
+            if qwc_setting.shape != (self.num_qubits,):
+                raise ValueError(
+                    "qwc_setting must have shape "
+                    f"({self.num_qubits},), got {qwc_setting.shape}."
+                )
+
+        return {
+            "aequo_clique": clique_arr,
+            "includes_identity": includes_identity,
+            "clique_observable_indices": clique_obs.copy(),
+            "setting_indices": setting_indices,
+            "setting_token": encode_setting_token(setting_indices),
+            "qwc_setting": qwc_setting,
+            "generator_indices": generator_indices,
+        }
+
+    def _build_qwc_setting_record(self, clique):
+        """Build a QWC product setting and harvest every target observable it hits."""
+        _, clique_obs = self._translate_aequo_clique(clique)
+        if clique_obs.size == 0:
+            raise RuntimeError(
+                "An identity-only AEQuO clique cannot define a physical QWC "
+                "measurement setting."
+            )
+
+        setting = np.zeros(self.num_qubits, dtype=np.int8)
+        generator_indices = []
+
+        for obs_idx in clique_obs:
+            idx = int(obs_idx)
+            o = self.obs[idx]
+            compatible = np.all((o == 0) | (setting == 0) | (o == setting))
+            if not compatible:
+                raise RuntimeError(
+                    f"AEQuO clique {list(clique)} is not QWC-compatible."
+                )
+
+            non_id = o != 0
+            sets_new = non_id & (setting == 0)
+            if np.any(sets_new):
+                generator_indices.append(idx)
+            setting[non_id] = o[non_id]
+
+        selected_mask = sample_obs_batch_from_setting_numba(
+            self.obs,
+            setting,
+        ).astype(bool, copy=False)
+        setting_indices = np.flatnonzero(selected_mask).astype(np.int32)
+
+        return self._make_setting_record(
+            clique=clique,
+            setting_indices=setting_indices,
+            qwc_setting=setting,
+            generator_indices=generator_indices,
+        )
+
+    def _build_fc_setting_record(self, clique):
+        """Build independent FC generators and harvest their complete target span."""
+        _, clique_obs = self._translate_aequo_clique(clique)
+        if clique_obs.size == 0:
+            raise RuntimeError(
+                "An identity-only AEQuO clique cannot define a physical FC "
+                "measurement setting."
+            )
+
+        # Validate the graph-to-observable index translation explicitly.
+        for i, j in itertools.combinations(clique_obs, 2):
+            if not self._get_fc_compat_row(int(i))[int(j)]:
+                raise RuntimeError(
+                    f"AEQuO clique {list(clique)} contains anticommuting "
+                    "Pauli strings."
+                )
+
+        basis = _GF2LinearBasis(max_bits=2 * self.num_qubits)
+        generator_indices = []
+
+        for obs_idx in clique_obs:
+            idx = int(obs_idx)
+            if basis.add(self._packed[idx]):
+                generator_indices.append(idx)
+
+        if not generator_indices:
+            raise RuntimeError(
+                f"AEQuO clique {list(clique)} produced no nonzero FC generator."
+            )
+
+        basis_rows_u64, pivot_bits_u8 = _export_basis_compact(basis)
+        selected_mask = in_span_batch_numba(
+            self._packed_u64,
+            basis_rows_u64,
+            pivot_bits_u8,
+        ).astype(bool, copy=False)
+        setting_indices = np.flatnonzero(selected_mask).astype(np.int32)
+
+        return self._make_setting_record(
+            clique=clique,
+            setting_indices=setting_indices,
+            qwc_setting=None,
+            generator_indices=generator_indices,
+        )
+
+    def _build_measurement_settings_pool(self):
+        """Precompute one physical setting record for every fixed AEQuO clique."""
+        records = []
+        record_map = {}
+        covered_clique_members = np.zeros(self.num_obs, dtype=bool)
+
+        for clique in self.cliques:
+            key = tuple(map(int, clique))
+            if key in record_map:
+                raise RuntimeError(f"Duplicate AEQuO clique encountered: {clique}.")
+
+            if self.commutativity_type == "qwc":
+                record = self._build_qwc_setting_record(clique)
+            else:
+                record = self._build_fc_setting_record(clique)
+
+            records.append(record)
+            record_map[key] = record
+            covered_clique_members[record["clique_observable_indices"]] = True
+
+        if not records:
+            raise RuntimeError("AEQuO generated an empty measurement-settings pool.")
+
+        if not np.all(covered_clique_members):
+            missing = np.flatnonzero(~covered_clique_members)
+            raise RuntimeError(
+                "The AEQuO clique partition does not cover every observable. "
+                f"Missing indices: {missing.tolist()}."
+            )
+
+        self.measurement_settings_pool = records
+        self.clique_setting_records = record_map
+
+    def _clique_to_Pauli_observable(self,clique):
+        """
+        Backward-compatible QWC helper returning the cached product setting and
+        translated nonidentity clique indices.
+        """
+        if self.commutativity_type != "qwc":
+            raise RuntimeError(
+                "_clique_to_Pauli_observable is defined only for QWC AEQuO."
+            )
+
+        key = tuple(map(int, clique))
+        record = self.clique_setting_records[key]
+        return (
+            record["qwc_setting"].copy(),
+            record["clique_observable_indices"].copy(),
+        )
     
     def _process_outcome(self,clique,outcome):
-        """ Helper function that calculates the outcome of each clique member within clique directly.
-        """
-        includes_identity = clique[0] == 0
-        clique = np.array(clique[1:]) - 1 if includes_identity else np.array(clique) - 1
-        clique_members = self.obs[clique]
-        outcome = np.repeat(outcome.reshape((1,-1)),len(clique_members),axis=0)
-        outcome[clique_members==0] = 1 # set to 1 if outside the support the respective to mask it out, hit observables
+        """Dispatch QWC raw-qubit or FC decoded-observable outcome processing."""
+        if self.commutativity_type == "qwc":
+            return self._process_qwc_outcome(clique, outcome)
+        return self._process_fc_outcome(clique, outcome)
+
+    def _process_qwc_outcome(self, clique, outcome):
+        """Preserve AEQuO's original QWC per-qubit outcome processing."""
+        includes_identity, clique_obs = self._translate_aequo_clique(clique)
+        clique_members = self.obs[clique_obs]
+
+        outcome = np.asarray(outcome).reshape(-1)
+        if outcome.shape != (self.num_qubits,):
+            raise ValueError(
+                "A QWC AEQuO outcome must contain one +/-1 value per qubit; "
+                f"expected shape ({self.num_qubits},), got {outcome.shape}."
+            )
+        if not np.all((outcome == 1) | (outcome == -1)):
+            raise ValueError("QWC AEQuO outcomes must contain only +/-1 values.")
+
+        tiled = np.repeat(
+            outcome.reshape((1, -1)),
+            len(clique_members),
+            axis=0,
+        )
+        tiled[clique_members == 0] = 1
+
         data = [1] if includes_identity else []
-        data = data + list(np.prod(outcome,axis=1).astype(int))
+        data += list(np.prod(tiled, axis=1).astype(int))
+        return data
+
+    def _process_fc_outcome(self, clique, outcome):
+        """Extract the selected clique's values from an FC observable payload."""
+        if not isinstance(outcome, dict):
+            raise TypeError(
+                "FC AEQuO requires the decoded observable-value payload "
+                "produced by Energy_estimator."
+            )
+
+        if outcome.get("format", None) != "observable_values":
+            raise ValueError(
+                "FC AEQuO outcome payload must have "
+                "format='observable_values'."
+            )
+
+        key = tuple(map(int, clique))
+        if key not in self.clique_setting_records:
+            raise KeyError(f"No setting record found for AEQuO clique {clique}.")
+        record = self.clique_setting_records[key]
+
+        payload_token = outcome.get("setting_token", None)
+        if payload_token != record["setting_token"]:
+            raise ValueError(
+                "FC outcome payload token does not match the setting generated "
+                f"for AEQuO clique {clique}."
+            )
+
+        obs_ids = np.asarray(
+            outcome.get("obs_ids", []),
+            dtype=np.int32,
+        ).reshape(-1)
+        values = np.asarray(
+            outcome.get("values", []),
+        ).reshape(-1)
+
+        if obs_ids.shape != values.shape:
+            raise ValueError(
+                "FC outcome payload obs_ids and values must have equal length."
+            )
+        if np.unique(obs_ids).size != obs_ids.size:
+            raise ValueError("FC outcome payload contains duplicate obs_ids.")
+        if np.any(obs_ids < 0) or np.any(obs_ids >= self.num_obs):
+            raise IndexError(
+                "FC outcome payload contains an observable index outside "
+                f"[0, {self.num_obs})."
+            )
+        if not np.all((values == 1) | (values == -1)):
+            raise ValueError("FC decoded observable values must contain only +/-1.")
+
+        value_by_obs = {
+            int(obs_idx): int(value)
+            for obs_idx, value in zip(obs_ids, values)
+        }
+
+        data = []
+        for vertex in np.asarray(clique, dtype=np.int32).reshape(-1):
+            vertex = int(vertex)
+            if vertex == 0:
+                data.append(1)
+            else:
+                obs_idx = vertex - 1
+                if obs_idx not in value_by_obs:
+                    raise KeyError(
+                        "FC outcome payload is missing observable index "
+                        f"{obs_idx}, required by AEQuO clique {clique}."
+                    )
+                data.append(value_by_obs[obs_idx])
+
         return data
     
     def get_energy(self):
         estim_mean = 0.0
         for i in range(self.paulis.paulis()):
-            estim_mean += self.coeffs[i]*naive_Mean(self.outcome_dict[i,i])
+            estim_mean += self.coeffs[i] * naive_Mean(
+                self.outcome_counts[i, i]
+            )
         return estim_mean
 
 ############################################################
@@ -547,14 +1336,82 @@ def qubitwise_commutation_graph(P):
     p = P.paulis()
     return graph(np.array([[1-qubitwise_inner_product(P.a_pauli(i0),P.a_pauli(i1)) for i1 in range(p)] for i0 in range(p)]))
 
+# returns the full-commutation graph of a given Pauli collection
+def full_commutation_graph(P):
+    # Inputs:
+    #     P - (pauli) - Pauli collection in binary symplectic form
+    # Outputs:
+    #     (graph) - an edge is weighted 1 iff the pair of Paulis commute fully
+    #
+    # For rows (x_i,z_i) and (x_j,z_j), full commutativity is equivalent to
+    #     x_i . z_j + z_i . x_j = 0 (mod 2).
+    X = np.asarray(P.X, dtype=np.uint8)
+    Z = np.asarray(P.Z, dtype=np.uint8)
+
+    if X.shape != Z.shape or X.ndim != 2:
+        raise ValueError(
+            "P.X and P.Z must be two-dimensional arrays with equal shape."
+        )
+
+    symplectic_products = (
+        X.astype(np.int64) @ Z.astype(np.int64).T
+        + Z.astype(np.int64) @ X.astype(np.int64).T
+    ) % 2
+    adjacency = 1 - symplectic_products
+
+    return graph(adjacency)
+
 # ESTIMATED PHYSICS FUNCTIONS
+
+def outcome_counts_to_legacy_dict_array(outcome_counts):
+    """Materialize the historical object-array representation for inspection."""
+    counts = np.asarray(outcome_counts)
+    if counts.ndim != 4 or counts.shape[2:] != (2, 2):
+        raise ValueError(
+            "outcome_counts must have shape (p, p, 2, 2)."
+        )
+    if counts.shape[0] != counts.shape[1]:
+        raise ValueError("The first two outcome-count axes must be square.")
+
+    p = counts.shape[0]
+    return np.array([
+        [{
+            (1, 1): int(counts[i, j, 0, 0]),
+            (1, -1): int(counts[i, j, 0, 1]),
+            (-1, 1): int(counts[i, j, 1, 0]),
+            (-1, -1): int(counts[i, j, 1, 1]),
+        } for j in range(p)]
+        for i in range(p)
+    ], dtype=object)
+
+
+def _single_counts(x):
+    """Return (+,+) and (-,-) counts from legacy or numeric storage."""
+    if isinstance(x, dict):
+        return x[(1, 1)], x[(-1, -1)]
+
+    x = np.asarray(x)
+    if x.shape != (2, 2):
+        raise ValueError("A numeric single-observable counter must be 2x2.")
+    return x[0, 0], x[1, 1]
+
+
+def _pair_counts(x):
+    """Return (++,+-,-+,--) counts from legacy or numeric storage."""
+    if isinstance(x, dict):
+        return x[(1, 1)], x[(1, -1)], x[(-1, 1)], x[(-1, -1)]
+
+    x = np.asarray(x)
+    if x.shape != (2, 2):
+        raise ValueError("A numeric pair counter must be 2x2.")
+    return x[0, 0], x[0, 1], x[1, 0], x[1, 1]
 
 def naive_Mean(xDict):
     # Inputs:
     #     xDict - (Dict) - number of ++/+-/-+/-- outcomes for single Pauli
     # Outputs:
     #     (float) - Bayesian estimate of mean
-    x0,x1 = xDict[(1,1)],xDict[(-1,-1)]
+    x0, x1 = _single_counts(xDict)
     if (x0+x1) == 0:
         return 0
     return (x0-x1)/(x0+x1)
@@ -565,7 +1422,7 @@ def bayes_Mean(xDict):
     #     xDict - (Dict) - number of ++/+-/-+/-- outcomes for single Pauli
     # Outputs:
     #     (float) - Bayesian estimate of mean
-    x0,x1 = xDict[(1,1)],xDict[(-1,-1)]
+    x0, x1 = _single_counts(xDict)
     return (x0-x1)/(x0+x1+2)
 
 # Bayesian estimation of variance from samples
@@ -574,7 +1431,7 @@ def bayes_Var(xDict):
     #     xDict - (Dict) - number of ++/+-/-+/-- outcomes for single Pauli
     # Outputs:
     #     (float) - Bayesian variance of mean
-    x0,x1 = xDict[(1,1)],xDict[(-1,-1)]
+    x0, x1 = _single_counts(xDict)
     return 4*((x0+1)*(x1+1))/((x0+x1+2)*(x0+x1+3))
 
 # Bayesian estimation of covariance from samples
@@ -585,9 +1442,9 @@ def bayes_Cov(xyDict,xDict,yDict):
     #     xDict  - (Dict) - number of ++/+-/-+/-- outcomes for second Pauli
     # Outputs:
     #     (float) - Bayesian estimate of mean
-    xy00,xy01,xy10,xy11 = xyDict[(1,1)],xyDict[(1,-1)],xyDict[(-1,1)],xyDict[(-1,-1)]
-    x0,x1 = xDict[(1,1)],xDict[(-1,-1)]
-    y0,y1 = yDict[(1,1)],yDict[(-1,-1)]
+    xy00, xy01, xy10, xy11 = _pair_counts(xyDict)
+    x0, x1 = _single_counts(xDict)
+    y0, y1 = _single_counts(yDict)
     p00 = 4*((x0+1)*(y0+1))/((x0+x1+2)*(y0+y1+2))
     p01 = 4*((x0+1)*(y1+1))/((x0+x1+2)*(y0+y1+2))
     p10 = 4*((x1+1)*(y0+1))/((x0+x1+2)*(y0+y1+2))
@@ -602,7 +1459,69 @@ def bayes_variance_graph(X,cc):
     # Outputs:
     #     (numpy.array{float}) - variance graph calculated with Bayesian estimates
     p = len(cc)
-    return graph(np.array([[(cc[i0]**2)*bayes_Var(X[i0,i0]) if i0==i1 else cc[i0]*cc[i1]*bayes_Cov(X[i0,i1],X[i0,i0],X[i1,i1]) for i1 in range(p)] for i0 in range(p)]))
+    X_array = np.asarray(X)
+
+    # Backward-compatible legacy path.
+    if X_array.ndim != 4:
+        return graph(np.array([
+            [
+                (cc[i0] ** 2) * bayes_Var(X[i0, i0])
+                if i0 == i1
+                else cc[i0] * cc[i1] * bayes_Cov(
+                    X[i0, i1],
+                    X[i0, i0],
+                    X[i1, i1],
+                )
+                for i1 in range(p)
+            ]
+            for i0 in range(p)
+        ]))
+
+    if X_array.shape != (p, p, 2, 2):
+        raise ValueError(
+            "Numeric Bayesian counters must have shape "
+            f"({p}, {p}, 2, 2), got {X_array.shape}."
+        )
+
+    counts = X_array.astype(np.float64, copy=False)
+    xy00 = counts[:, :, 0, 0]
+    xy01 = counts[:, :, 0, 1]
+    xy10 = counts[:, :, 1, 0]
+    xy11 = counts[:, :, 1, 1]
+
+    diagonal = np.arange(p)
+    plus = counts[diagonal, diagonal, 0, 0]
+    minus = counts[diagonal, diagonal, 1, 1]
+
+    x0 = plus[:, None]
+    x1 = minus[:, None]
+    y0 = plus[None, :]
+    y1 = minus[None, :]
+
+    x_denominator = x0 + x1 + 2.0
+    y_denominator = y0 + y1 + 2.0
+    marginal_denominator = x_denominator * y_denominator
+
+    p00 = 4.0 * (x0 + 1.0) * (y0 + 1.0) / marginal_denominator
+    p01 = 4.0 * (x0 + 1.0) * (y1 + 1.0) / marginal_denominator
+    p10 = 4.0 * (x1 + 1.0) * (y0 + 1.0) / marginal_denominator
+    p11 = 4.0 * (x1 + 1.0) * (y1 + 1.0) / marginal_denominator
+
+    joint_total = xy00 + xy01 + xy10 + xy11
+    covariance = 4.0 * (
+        (xy00 + p00) * (xy11 + p11)
+        - (xy01 + p01) * (xy10 + p10)
+    ) / ((joint_total + 4.0) * (joint_total + 5.0))
+
+    coeffs = np.asarray(cc, dtype=np.float64).reshape(-1)
+    adjacency = covariance * coeffs[:, None] * coeffs[None, :]
+
+    variance = 4.0 * (plus + 1.0) * (minus + 1.0) / (
+        (plus + minus + 2.0) * (plus + minus + 3.0)
+    )
+    adjacency[diagonal, diagonal] = coeffs * coeffs * variance
+
+    return graph(adjacency)
 
 # SIMULATION ALGORITHMS
 
@@ -618,6 +1537,3 @@ def Ll_updates(L,l,shots):
     shot_nums = [round(r0_shots*(1+l)**i) for i in range(L-1)]
     shot_nums.append(shots-sum(shot_nums))
     return set([0]+list(itertools.accumulate(shot_nums))[:-1])
-
-
-

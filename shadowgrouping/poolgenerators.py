@@ -2226,6 +2226,93 @@ class Shadow_Grouping_FC(Measurement_scheme):
         self._fc_row_cache[idx] = row
         return row
 
+    def _register_setting(self, setting_indices, selected_mask=None,
+                          setting_token=None):
+        """
+        Account for one executed measurement setting.
+
+        Both queued LDF settings and settings constructed from the ordinary
+        ShadowGrouping ranking pass through this method.
+        """
+        setting_indices = np.asarray(
+            setting_indices,
+            dtype=np.int32,
+        ).ravel()
+        setting_indices = np.unique(setting_indices)
+        setting_indices.sort()
+
+        if setting_indices.size == 0:
+            raise RuntimeError("Cannot register an empty measurement setting.")
+
+        if (
+            np.any(setting_indices < 0)
+            or np.any(setting_indices >= self.num_obs)
+        ):
+            raise IndexError(
+                "A measurement setting contains an observable index outside "
+                f"[0, {self.num_obs})."
+            )
+
+        if selected_mask is None:
+            selected_mask = np.zeros(self.num_obs, dtype=bool)
+            selected_mask[setting_indices] = True
+        else:
+            selected_mask = np.asarray(
+                selected_mask,
+                dtype=bool,
+            ).reshape(-1)
+            if selected_mask.shape != (self.num_obs,):
+                raise ValueError(
+                    "selected_mask must have shape "
+                    f"({self.num_obs},), got {selected_mask.shape}."
+                )
+
+            if not np.array_equal(
+                np.flatnonzero(selected_mask).astype(np.int32),
+                setting_indices,
+            ):
+                raise ValueError(
+                    "selected_mask and setting_indices describe different "
+                    "hit sets."
+                )
+
+        canonical_token = encode_setting_token(setting_indices)
+        if setting_token is None:
+            setting_token = canonical_token
+        elif setting_token != canonical_token:
+            raise ValueError(
+                "setting_token does not match the canonical observable-index "
+                "set."
+            )
+
+        self.N_hits += selected_mask.astype(np.int64)
+
+        if self.compute_N_hits_pairs:
+            idx = self._append_is_hit_hit_outer(
+                setting_token,
+                setting_indices,
+            )
+            if idx.size:
+                self.N_hits_pairs[np.ix_(idx, idx)] += 1
+
+        if setting_token not in self.seen_settings:
+            self._append_is_hit_row(selected_mask)
+            self.seen_settings.add(setting_token)
+            if self.save_scheme:
+                self.diff_settings_counter += 1
+                self.num_diff_settings_list.append(
+                    self.diff_settings_counter
+                )
+                self.all_settings_list.append(
+                    list(map(int, setting_indices))
+                )
+        elif self.save_scheme:
+            self.num_diff_settings_list.append(self.diff_settings_counter)
+            self.all_settings_list.append(list(map(int, setting_indices)))
+
+        return setting_indices
+
+
     def find_setting(self,forced_idx=None):
         weights = self.weight_function(self.w, self.eps, self.N_hits)
 
