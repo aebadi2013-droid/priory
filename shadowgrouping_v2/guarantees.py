@@ -736,3 +736,9 @@ def get_epsilon_Chebyshev_scalar_tightest_numba(delta, N_hits, N_hits_pairs, w, 
 
     eps_stat, eps_sys = _chebyshev_tightest_core(delta, N_hits, N_hits_pairs, w, cov_real)
     return eps_stat + eps_sys
+
+
+def get_diagonal_proxy_of_variance(N_hits, w):
+    if np.any(N_hits == 0):
+        raise ValueError("N_hits still has some zero values.")
+    return np.sum(w**2 / N_hits)
