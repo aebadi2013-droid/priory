@@ -1659,7 +1659,6 @@ class LDF_Sorted_Insertion_OGM(_AllocationMixin, Measurement_scheme):
 
         if restrict_to_active and active_mask is not None:
             selected_mask &= active_mask
-
         group_idx = np.flatnonzero(selected_mask).astype(np.int32)
 
         return group_idx, gen_indices
@@ -1786,8 +1785,8 @@ class LDF_Sorted_Insertion_OGM(_AllocationMixin, Measurement_scheme):
 
         if restrict_to_active and active_mask is not None:
             selected_mask &= active_mask
-
         group_idx = np.flatnonzero(selected_mask).astype(np.int32)
+
 
         return group_idx, gen_indices
 
@@ -1930,7 +1929,6 @@ class LDF_Sorted_Insertion_OGM(_AllocationMixin, Measurement_scheme):
                         self.obs[rem_ids],
                         setting,
                     )
-
                     group_idx = rem_ids[np.flatnonzero(is_hit_sub)].astype(np.int32)
 
                 else:
@@ -2104,7 +2102,9 @@ class LDF_Sorted_Insertion_OGM(_AllocationMixin, Measurement_scheme):
                         dtype=np.int32,
                     ).copy()
                     setting_indices.sort()
-
+                    selected_mask = np.zeros(self.num_obs, dtype=bool)
+                    selected_mask[setting_indices] = True
+                    self.N_hits += selected_mask.astype(np.int64)
                     return setting_indices, {
                         "group_index": group_idx,
                     }
@@ -2129,7 +2129,9 @@ class LDF_Sorted_Insertion_OGM(_AllocationMixin, Measurement_scheme):
         info = {
             "group_index": group_index,
         }
-
+        selected_mask = np.zeros(self.num_obs, dtype=bool)
+        selected_mask[setting_indices] = True
+        self.N_hits += selected_mask.astype(np.int64)
         return setting_indices, info
 
 

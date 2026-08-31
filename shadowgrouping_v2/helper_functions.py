@@ -92,6 +92,28 @@ def hit_by_batch_numba(O_batch, P):
     
     return result
 
+@njit
+def commute_by_batch_numba(O_batch, P):
+    n_obs, n_qubits = O_batch.shape
+    result = np.empty(n_obs, dtype=np.bool_)
+
+    for i in range(n_obs):
+        parity = 0
+
+        for j in range(n_qubits):
+            o = O_batch[i, j]
+            p = P[j]
+
+            # Different non-identity Paulis anticommute locally.
+            if o != 0 and p != 0 and o != p:
+                parity ^= 1
+
+        # Full Pauli strings commute iff the number
+        # of local anticommuting positions is even.
+        result[i] = parity == 0
+
+    return result
+
 def hit_by_batch_standalone(O_batch, P, *, pedantic=True):
     """
     Checks which observables in O_batch are hit by the setting P.
