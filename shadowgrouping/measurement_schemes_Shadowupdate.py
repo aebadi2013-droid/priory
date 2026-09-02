@@ -2803,22 +2803,22 @@ class DomClique(Measurement_scheme):
         return setting
 
     
-
 class Best_scheme_given_pool(_AllocationMixin, Measurement_scheme):
     """
     Group-pool-agnostic measurement scheme for energy estimation.
 
-    This class does not generate groups internally. Instead, it imports a pool
-    of measurement settings from the `settings_dict` of another measurement
-    scheme, interprets each key as a token encoding the sorted indices of Pauli
-    observables measured by that setting, and then reallocates the measurement
-    budget over that imported pool.
+    This class does not generate groups internally. If the source scheme has a
+    ``cliques_pool`` attribute, the complete generated pool is imported from
+    there. Otherwise, the pool is reconstructed from the unique setting tokens
+    in ``settings_dict``. The measurement budget is then reallocated over the
+    imported pool.
 
     The budget allocation is inherited from `_AllocationMixin`.
 
     Source-pool convention
     ----------------------
-    The source scheme must store settings using
+    When ``settings_dict`` is used as the fallback source, the source scheme
+    must store settings using
 
         token = encode_setting_token(setting_indices)
 
@@ -2850,8 +2850,8 @@ class Best_scheme_given_pool(_AllocationMixin, Measurement_scheme):
       - is_overlapping;
       - k, if commutativity_type == "kc".
 
-    Allocation options such as total_rounds, allocation_objective,
-    rounding_strategy, and md_gap_tol_rel do not need to match the source scheme.
+    Allocation options such as total_rounds, allocation_objective, and
+    md_gap_tol_rel do not need to match the source scheme.
 
     Allocation objectives
     ---------------------
@@ -2864,21 +2864,32 @@ class Best_scheme_given_pool(_AllocationMixin, Measurement_scheme):
       - allocation_objective = "bernstein_l1":
 
             sum_j |alpha_j| / sqrt(N_j)
+
+    After allocation, ``post_rounded_proxy_info`` contains the statistical
+    proxy, truncation-bias proxy, total post-rounded proxy, and coverage counts
+    for the final integer measurement scheme.
     """
 
-    def __init__(self,observables,weights,source_scheme,epsilon: float = 0.1,
+    def __init__(self,observables,weights,source_scheme,
                  total_rounds: int = 0,is_overlapping: bool = True,
                  commutativity_type: str = "qwc", *,
                  informed_allocation: bool = True,
                  allocation_objective: str = "bernstein_l1",
                  attempt_truncation: bool = False,
-                 rounding_strategy: str = "largest_fraction",
                  md_gap_tol_rel: float = 1e-4,
+                 md_execution_mode: str = "default",
+                 md_max_time: float | None = None,
+                 enable_pre_pruning: bool = True,
                  prior_counts=None,
-                 k: int | None = None):
-        
-        #super().__init__(observables, weights, epsilon, save_scheme=False)
+                 verbose: bool = False,
+                 k: int | None = None,
+                 compute_N_hits_pairs=True):
+        epsilon = 0.01
         super().__init__(observables, weights, epsilon)
+        M, n = observables.shape
+        self.compute_N_hits_pairs = compute_N_hits_pairs
+        if self.compute_N_hits_pairs:
+            self.N_hits_pairs = np.zeros((M, M), dtype=int)
         self.is_overlapping = bool(is_overlapping)
         self.is_sampling = False
 
@@ -2935,16 +2946,23 @@ class Best_scheme_given_pool(_AllocationMixin, Measurement_scheme):
 
         self.attempt_truncation = bool(attempt_truncation)
 
-        self.rounding_strategy = str(rounding_strategy).lower()
-        if self.rounding_strategy not in ("largest_fraction", "marginal"):
-            raise ValueError(
-                "rounding_strategy must be either 'largest_fraction' or 'marginal'. "
-                f"Got {rounding_strategy!r}."
-            )
-
         self.md_gap_tol_rel = float(md_gap_tol_rel)
         if self.md_gap_tol_rel <= 0.0:
             raise ValueError("md_gap_tol_rel must be positive.")
+            
+        self.md_execution_mode = md_execution_mode
+        valid_execution_modes = {"default", "until-converged", "user-selected"}
+        if self.md_execution_mode not in valid_execution_modes:
+            raise ValueError(
+                "md_execution_mode must be one of 'default', 'until-converged', "
+                f"or 'user-selected'. Got {self.md_execution_mode!r}."
+            )
+        
+        self.md_max_time = md_max_time
+        self.enable_pre_pruning = enable_pre_pruning
+        # verbose activates updates on allocate_budget()
+        self.verbose = verbose
+        
 
         if self.attempt_truncation and not self.informed_allocation:
             raise ValueError(
@@ -2993,8 +3011,14 @@ class Best_scheme_given_pool(_AllocationMixin, Measurement_scheme):
             "attempted": False,
             "selected": False}
 
+        self.post_rounded_proxy_info = {
+            "available": False,
+            "reason": "allocation_not_run",
+        }
+
         self.imported_pool_info = {
             "source_class": source_scheme.__class__.__name__,
+            "pool_source": None,
             "num_imported_settings_raw": 0,
             "num_imported_settings_unique": 0,
             "num_covered_observables": 0,
@@ -3002,6 +3026,7 @@ class Best_scheme_given_pool(_AllocationMixin, Measurement_scheme):
             "num_uncovered_positive_weight_observables": 0,
         }
 
+        self.cliques_pool_retrieved_from_settings_dict = None
         self.cliques_pool: list[np.ndarray] = []
         self.source_scheme = source_scheme
 
@@ -3013,7 +3038,8 @@ class Best_scheme_given_pool(_AllocationMixin, Measurement_scheme):
     # Reset
     # ------------------------------------------------------------------
 
-    def reset(self, updated_total_rounds=None, clear_prior_counts=False):
+    def reset(self, updated_total_rounds=None, clear_prior_counts=False,
+              reallocate_budget = True):
         """
         Reset the newly allocated measurement scheme and re-run budget allocation
         over the already imported group pool.
@@ -3025,11 +3051,14 @@ class Best_scheme_given_pool(_AllocationMixin, Measurement_scheme):
             self.total_rounds = int(updated_total_rounds)
             if self.total_rounds < 0:
                 raise ValueError("total_rounds must be >= 0.")
+        if self.compute_N_hits_pairs:
+            self.N_hits_pairs  = np.zeros_like(self.N_hits_pairs)
 
         if clear_prior_counts:
             self.prior_counts[:] = 0
 
-        self.allocate_budget()
+        if reallocate_budget:
+            self.allocate_budget()
 
     # ------------------------------------------------------------------
     # Source validation
@@ -3039,14 +3068,28 @@ class Best_scheme_given_pool(_AllocationMixin, Measurement_scheme):
         """
         Validate that the source scheme is compatible with this scheme.
         """
-        if not hasattr(source_scheme, "settings_dict"):
-            raise ValueError("source_scheme must have a settings_dict attribute.")
+        if hasattr(source_scheme, "cliques_pool"):
+            if source_scheme.cliques_pool is None:
+                raise ValueError("source_scheme.cliques_pool is None.")
 
-        if len(source_scheme.settings_dict) == 0:
-            raise ValueError(
-                "source_scheme.settings_dict is empty. There are no settings "
-                "from which to build a group pool."
-            )
+            if len(source_scheme.cliques_pool) == 0:
+                raise ValueError(
+                    "source_scheme.cliques_pool is empty. Generate the complete "
+                    "setting pool before constructing Best_scheme_given_pool."
+                )
+
+        else:
+            if not hasattr(source_scheme, "settings_dict"):
+                raise ValueError(
+                    "source_scheme must provide either a cliques_pool attribute "
+                    "or a settings_dict attribute."
+                )
+
+            if len(source_scheme.settings_dict) == 0:
+                raise ValueError(
+                    "source_scheme.settings_dict is empty. There are no settings "
+                    "from which to build a group pool."
+                )
 
         if not hasattr(source_scheme, "obs"):
             raise ValueError("source_scheme must have an obs attribute.")
@@ -3084,7 +3127,7 @@ class Best_scheme_given_pool(_AllocationMixin, Measurement_scheme):
             raise ValueError(
                 "source_scheme.obs and self.obs differ. Best_scheme_given_pool "
                 "requires the same observable array and ordering, because "
-                "settings_dict tokens encode observable indices."
+                "the imported groups encode observable indices."
             )
 
         if not hasattr(source_scheme, "commutativity_type"):
@@ -3186,7 +3229,7 @@ class Best_scheme_given_pool(_AllocationMixin, Measurement_scheme):
 
         if len(groups) == 0:
             raise ValueError(
-                "No usable groups were decoded from source_scheme.settings_dict."
+                "No usable groups were found in the imported setting pool."
             )
 
         return groups, canonical_to_source_token
@@ -3237,9 +3280,9 @@ class Best_scheme_given_pool(_AllocationMixin, Measurement_scheme):
 
         Because this class imports a fixed pool, it does not add coverage-repair
         singleton groups. If positive-weight observables are uncovered and have
-        no prior samples, allocation without truncation would silently ignore or
-        leave them impossible to measure. Therefore, this is only allowed when
-        attempt_truncation=True.
+        no prior samples, they are impossible to measure from this pool.
+        Therefore, this is only allowed when objective-level truncation is
+        enabled with attempt_truncation=True.
         """
         covered = np.zeros(self.num_obs, dtype=bool)
 
@@ -3258,8 +3301,8 @@ class Best_scheme_given_pool(_AllocationMixin, Measurement_scheme):
             raise ValueError(
                 "The imported setting pool does not cover all positive-weight "
                 "observables with zero prior counts, and attempt_truncation=False. "
-                "Uncovered positive-weight observables would have no samples and "
-                "would not be accounted for by a truncation penalty. "
+                "Enable objective-level truncation when importing a pool that "
+                "cannot measure the full positive-weight Hamiltonian support. "
                 f"First missing indices: {missing_positive_no_prior[:20].tolist()}"
                 + (" ..." if missing_positive_no_prior.size > 20 else "")
             )
@@ -3305,28 +3348,53 @@ class Best_scheme_given_pool(_AllocationMixin, Measurement_scheme):
 
     def get_groups(self, source_scheme):
         """
-        Import the setting pool from source_scheme.settings_dict.
+        Import the complete setting pool from source_scheme.
 
-        Each key in source_scheme.settings_dict is decoded as a sorted list of
-        observable indices. The resulting groups are canonicalized and
-        deduplicated, but no coverage-repair groups are added.
+        If source_scheme exposes ``cliques_pool``, that complete generated pool
+        is used directly, including groups that received zero shots in the
+        source allocation. Otherwise, the unique settings are reconstructed
+        from the keys of ``source_scheme.settings_dict``. The resulting groups
+        are canonicalized and deduplicated, but no coverage-repair groups are
+        added.
         """
         self._validate_source_scheme(source_scheme)
 
         token_group_pairs = []
 
-        for token in source_scheme.settings_dict.keys():
-            if not isinstance(token, (bytes, bytearray, memoryview)):
-                raise TypeError(
-                    "settings_dict keys must be byte-like tokens produced by "
-                    "encode_setting_token."
+        if hasattr(source_scheme, "cliques_pool"):
+            pool_source = "cliques_pool"
+            self.cliques_pool_retrieved_from_settings_dict = False
+
+            for group in source_scheme.cliques_pool:
+                arr = np.asarray(group, dtype=np.int32).ravel().copy()
+
+                # This token is used only to preserve any token-keyed metadata
+                # from the source. Full validation and deduplication are still
+                # performed by _postprocess_imported_groups below.
+                canonical_arr = np.unique(arr)
+                canonical_arr.sort()
+                source_token = encode_setting_token(canonical_arr)
+                token_group_pairs.append((source_token, arr))
+
+        else:
+            pool_source = "settings_dict"
+            self.cliques_pool_retrieved_from_settings_dict = True
+
+            for token in source_scheme.settings_dict.keys():
+                if not isinstance(token, (bytes, bytearray, memoryview)):
+                    raise TypeError(
+                        "settings_dict keys must be byte-like tokens produced by "
+                        "encode_setting_token."
+                    )
+
+                token_bytes = bytes(token)
+                group = decode_setting_token(token_bytes).astype(
+                    np.int32, copy=True
                 )
 
-            token_bytes = bytes(token)
-            group = decode_setting_token(token_bytes).astype(np.int32, copy=True)
+                token_group_pairs.append((token_bytes, group))
 
-            token_group_pairs.append((token_bytes, group))
-
+        self.imported_pool_info["pool_source"] = pool_source
         self.imported_pool_info["num_imported_settings_raw"] = int(
             len(token_group_pairs))
 

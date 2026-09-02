@@ -53,8 +53,11 @@ class AEQuO(Shadow_Grouping_FC):
     partition and continues to drive ``S`` and ``V``. Joint +/-1 outcome
     counts are stored in dense integer tensors rather than an object array of
     Python dictionaries.
-    ``self.measurement_settings_pool`` stores the corresponding physical QWC or
-    FC setting records. Their harvested hit sets may overlap.
+    ``self.measurement_settings_pool`` stores the unique corresponding physical
+    QWC or FC setting records. ``self.cliques_pool`` is aligned one-to-one with
+    those records and stores only their sorted, zero-based harvested-observable
+    index arrays, matching the allocation-facing pool convention used by the
+    other measurement protocols. These harvested hit sets may overlap.
 
     ``receive_outcomes`` accepts proposal-ordered feedback in batches. In FC
     mode, the optimized path accepts decoded observable-value matrices together
@@ -70,14 +73,19 @@ class AEQuO(Shadow_Grouping_FC):
         super().__init__(
             observables,
             weights,
-            epsilon=0.01,
             weight_function=None,
             save_scheme=save_scheme,
             handle_ties=True,
             compute_N_hits_pairs=compute_N_hits_pairs,
             commutativity_type=commutativity_type,
+            initial_ordering_strategy="coefficient",
         )
-        #initial_ordering_strategy="coefficient",
+
+        # AEQuO's identity-inclusive LDF cliques form a partition, but the
+        # physical settings exposed through cliques_pool harvest additional
+        # compatible observables and can therefore overlap.
+        self.is_overlapping = True
+
         self.V = np.zeros((self.num_obs + 1, self.num_obs + 1), dtype=float)
         self.offset = offset
         self.__observables_to_AEQuO_list()
@@ -115,6 +123,7 @@ class AEQuO(Shadow_Grouping_FC):
 
         self.cliques = LDF(self.compatibility_graph)
         self.measurement_settings_pool = []
+        self.cliques_pool = []
         self.clique_setting_records = {}
         self._build_measurement_settings_pool()
         self.current_setting_record = None
@@ -152,12 +161,6 @@ class AEQuO(Shadow_Grouping_FC):
         # already owns the same attribute.
         self.settings_dict = {}
 
-        self.scheme_params.update({
-            "adaptiveness_L": adaptiveness_L,
-            "interval_skewness_l": interval_skewness_l,
-            "budget": budget,
-        })
-
     def _empty_outcome_counts(self):
         """Return the zeroed identity-inclusive joint-outcome count tensor."""
         p = self.num_obs + 1
@@ -174,7 +177,10 @@ class AEQuO(Shadow_Grouping_FC):
         return outcome_counts_to_legacy_dict_array(self.outcome_counts)
 
     def reset(self):
-        """Reset execution and Bayesian state while retaining graph/clique metadata."""
+        """
+        Reset execution and Bayesian state while retaining the internal clique
+        metadata and the complete public measurement-setting pools.
+        """
         super().reset()
 
         self.outcome_counts = self._empty_outcome_counts()
@@ -242,8 +248,8 @@ class AEQuO(Shadow_Grouping_FC):
             None if qwc_setting is None else qwc_setting.copy()
         )
         self.current_setting_record = record
-        info = {}
-        return setting_indices , info
+
+        return setting_indices
         
     def overlapping_bayes_min_var(self):
         # The standard version of the setting_function, i.e., the function that 
@@ -831,8 +837,108 @@ class AEQuO(Shadow_Grouping_FC):
             generator_indices=generator_indices,
         )
 
+    def _canonicalize_public_measurement_settings_pool(self, records):
+        """
+        Build the unique public physical-setting pool from per-clique records.
+
+        ``clique_setting_records`` remains one-to-one with AEQuO's internal
+        identity-inclusive cliques. The public ``measurement_settings_pool``
+        instead contains one record per distinct harvested hit set, identified
+        by its canonical setting token. ``cliques_pool`` stores independent
+        copies of those hit sets in the generic allocation-facing format.
+        """
+        public_records = []
+        seen_tokens = set()
+
+        for record in records:
+            setting_indices = np.asarray(
+                record["setting_indices"],
+                dtype=np.int32,
+            ).reshape(-1)
+            setting_indices = np.unique(setting_indices)
+            setting_indices.sort()
+
+            if setting_indices.size == 0:
+                raise RuntimeError(
+                    "AEQuO generated an empty public measurement setting."
+                )
+
+            if (
+                np.any(setting_indices < 0)
+                or np.any(setting_indices >= self.num_obs)
+            ):
+                raise IndexError(
+                    "An AEQuO public measurement setting contains an "
+                    "observable index outside "
+                    f"[0, {self.num_obs})."
+                )
+
+            token = encode_setting_token(setting_indices)
+            stored_token = record.get("setting_token", token)
+            if stored_token != token:
+                raise RuntimeError(
+                    "An AEQuO measurement-setting record has a setting token "
+                    "that does not match its canonical observable-index set."
+                )
+
+            if token in seen_tokens:
+                continue
+
+            seen_tokens.add(token)
+
+            # Keep the rich public record independent of the record used by
+            # AEQuO's internal clique-to-setting lookup.
+            public_record = {
+                key: value.copy() if isinstance(value, np.ndarray) else value
+                for key, value in record.items()
+            }
+            public_record["setting_indices"] = setting_indices.copy()
+            public_record["setting_token"] = token
+            public_records.append(public_record)
+
+        if not public_records:
+            raise RuntimeError("AEQuO generated an empty measurement-settings pool.")
+
+        covered = np.zeros(self.num_obs, dtype=bool)
+        for record in public_records:
+            covered[record["setting_indices"]] = True
+
+        if not np.all(covered):
+            missing = np.flatnonzero(~covered)
+            raise RuntimeError(
+                "The final AEQuO measurement-settings pool does not cover every "
+                f"observable. Missing indices: {missing.tolist()}."
+            )
+
+        self.measurement_settings_pool = public_records
+        self.cliques_pool = [
+            record["setting_indices"].copy()
+            for record in self.measurement_settings_pool
+        ]
+
+        if len(self.cliques_pool) != len(self.measurement_settings_pool):
+            raise RuntimeError(
+                "The AEQuO cliques_pool and measurement_settings_pool are not "
+                "aligned."
+            )
+
+        for group, record in zip(
+            self.cliques_pool,
+            self.measurement_settings_pool,
+        ):
+            if not np.array_equal(group, record["setting_indices"]):
+                raise RuntimeError(
+                    "An AEQuO cliques_pool entry does not match its aligned "
+                    "measurement-setting record."
+                )
+
     def _build_measurement_settings_pool(self):
-        """Precompute one physical setting record for every fixed AEQuO clique."""
+        """
+        Precompute per-clique records and the complete public setting pools.
+
+        The internal record map retains one entry for every fixed AEQuO clique.
+        The public pools are canonicalized and deduplicated by harvested hit set.
+        """
         records = []
         record_map = {}
         covered_clique_members = np.zeros(self.num_obs, dtype=bool)
@@ -852,7 +958,7 @@ class AEQuO(Shadow_Grouping_FC):
             covered_clique_members[record["clique_observable_indices"]] = True
 
         if not records:
-            raise RuntimeError("AEQuO generated an empty measurement-settings pool.")
+            raise RuntimeError("AEQuO generated no per-clique setting records.")
 
         if not np.all(covered_clique_members):
             missing = np.flatnonzero(~covered_clique_members)
@@ -861,8 +967,8 @@ class AEQuO(Shadow_Grouping_FC):
                 f"Missing indices: {missing.tolist()}."
             )
 
-        self.measurement_settings_pool = records
         self.clique_setting_records = record_map
+        self._canonicalize_public_measurement_settings_pool(records)
 
     def _clique_to_Pauli_observable(self,clique):
         """

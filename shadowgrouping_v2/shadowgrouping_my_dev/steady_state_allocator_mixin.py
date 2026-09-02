@@ -1,6 +1,6 @@
-import numpy as np
+import numpy as np, operator
 
-from .helper_functions import encode_setting_token
+from shadowgrouping_v2.shadowgrouping_my_dev.helper_functions import encode_setting_token
 
 
 class SteadyStateAllocatorMixin:
@@ -14,13 +14,43 @@ class SteadyStateAllocatorMixin:
       - self.is_adaptive
     """
 
-    def steady_state_budget_allocation(self, num_steps=1, beta=0.01, verbose=False):
+    def steady_state_budget_allocation(
+        self,
+        num_steps=None,
+        beta=0.01,
+        verbose=False,
+        max_generation_steps=None,
+    ):
         """
-        Allocate <num_steps> rounds of settings with the steady-state repetition strategy.
+        Allocate settings with the steady-state repetition strategy.
+
+        Parameters
+        ----------
+        num_steps : int or None, optional
+            If an integer is provided, allocate exactly ``num_steps`` rounds,
+            retaining the original finite-budget behavior. If ``None``
+            (default), call ``find_setting`` one round at a time until the
+            steady-state criterion is satisfied, then return without applying
+            any repetitions from the frozen steady block.
+        beta : float, optional
+            Confidence parameter used by the steady-state tests. Must lie in
+            ``(0, 1)``.
+        verbose : bool, optional
+            Print window updates, convergence diagnostics, and an end-of-call
+            summary.
+        max_generation_steps : int or None, optional
+            Optional safety limit for the number of explicit ``find_setting``
+            calls made by this invocation when ``num_steps is None``. This is
+            not an allocation budget. If the limit is reached before steady
+            state, a ``RuntimeError`` is raised and the resumable allocator
+            state is preserved. It must be ``None`` in finite-budget mode.
 
         This version is resumable across multiple calls:
           - before steady state: resumes window generation/checking
           - in steady state: resumes inside the repeated block
+
+        Calling with ``num_steps=None`` after steady state has already been
+        reached is a no-op.
 
         Verbose prints:
           (1) W updates + round index
@@ -46,51 +76,75 @@ class SteadyStateAllocatorMixin:
         find_calls_start = self.steady_find_calls
         rounds_start = self.num_settings
 
-        remaining = int(num_steps)
-        if remaining <= 0:
-            return
+        run_until_steady = num_steps is None
 
-        while remaining > 0:
-            # PRE-STEADY REGIME
-            if not self.steady_reached:
-                self._steady_do_one_round_find_setting(track_window=True, verbose=verbose)
-                remaining -= 1
+        if run_until_steady:
+            if max_generation_steps is not None:
+                max_generation_steps = self._steady_integer_argument(
+                    max_generation_steps,
+                    "max_generation_steps",
+                )
+                if max_generation_steps <= 0:
+                    raise ValueError("max_generation_steps must be a positive integer.")
 
-                # Check window boundary condition (depends on phase)
-                if self.steady_phase == "FIRST_WINDOW":
-                    # End first window once all observables measured >= 1
-                    if np.all(self.measurement_scheme.N_hits > 0):
-                        self._steady_finalize_window(verbose=verbose)
+            generated_this_call = 0
+
+            while not self.steady_reached:
+                if (
+                    max_generation_steps is not None
+                    and generated_this_call >= max_generation_steps
+                ):
+                    raise RuntimeError(
+                        self._steady_generation_limit_message(
+                            max_generation_steps=max_generation_steps,
+                            generated_this_call=generated_this_call,
+                        )
+                    )
+
+                self._steady_advance_presteady_one_round(verbose=verbose)
+                generated_this_call += 1
+
+        else:
+            if max_generation_steps is not None:
+                raise ValueError(
+                    "max_generation_steps is only valid when num_steps is None."
+                )
+
+            remaining = self._steady_integer_argument(num_steps, "num_steps")
+            if remaining <= 0:
+                return
+
+            while remaining > 0:
+                # PRE-STEADY REGIME
+                if not self.steady_reached:
+                    self._steady_advance_presteady_one_round(verbose=verbose)
+                    remaining -= 1
+
+                # STEADY REGIME
+                elif self.steady_phase == "STEADY_BLOCK":
+                    # Consume the NEXT chunk of the current repeated block
+                    block_remaining = int(self.steady_block_size) - int(self.steady_block_pos)
+                    if block_remaining < 0:
+                        raise RuntimeError("Internal error: steady_block_pos exceeded steady_block_size.")
+
+                    # If we are exactly at the end of the block, wrap to the next block
+                    if block_remaining == 0:
+                        self.steady_block_pos = 0
+                        block_remaining = int(self.steady_block_size)
+
+                    chunk = min(remaining, block_remaining)
+                    if chunk <= 0:
+                        break
+
+                    self._steady_apply_block_chunk(chunk)
+                    remaining -= chunk
+
+                    # If block is fully consumed, wrap around to the beginning of the next one
+                    if self.steady_block_pos == self.steady_block_size:
+                        self.steady_block_pos = 0
+
                 else:
-                    # End window by size W
-                    if self.steady_W > 0 and self.steady_window_pos >= self.steady_W:
-                        self._steady_finalize_window(verbose=verbose)
-
-            # STEADY REGIME
-            elif self.steady_phase == "STEADY_BLOCK":
-                # Consume the NEXT chunk of the current repeated block
-                block_remaining = int(self.steady_block_size) - int(self.steady_block_pos)
-                if block_remaining < 0:
-                    raise RuntimeError("Internal error: steady_block_pos exceeded steady_block_size.")
-
-                # If we are exactly at the end of the block, wrap to the next block
-                if block_remaining == 0:
-                    self.steady_block_pos = 0
-                    block_remaining = int(self.steady_block_size)
-
-                chunk = min(remaining, block_remaining)
-                if chunk <= 0:
-                    break
-
-                self._steady_apply_block_chunk(chunk)
-                remaining -= chunk
-
-                # If block is fully consumed, wrap around to the beginning of the next one
-                if self.steady_block_pos == self.steady_block_size:
-                    self.steady_block_pos = 0
-
-            else:
-                raise RuntimeError(f"Unknown steady_phase: {self.steady_phase}")
+                    raise RuntimeError(f"Unknown steady_phase: {self.steady_phase}")
 
         # End-of-call verbose
         if verbose:
@@ -100,6 +154,12 @@ class SteadyStateAllocatorMixin:
             total = int(rounds_end - rounds_start)
             frac = (called / total) if total > 0 else 0.0
             print(f"[summary] find_setting calls in this allocation: {called} / {total} = {frac:.6f}")
+            if run_until_steady:
+                unique = len(self.measurement_scheme.settings_dict)
+                print(
+                    f"[pool summary] steady state reached at round={self.num_settings}  "
+                    f"unique_settings={unique}"
+                )
 
         return
 
@@ -159,6 +219,48 @@ class SteadyStateAllocatorMixin:
         self.steady_beta = beta
         self.steady_c_beta = float(np.sqrt(2.0 * np.log(1.0 / beta)))
 
+    @staticmethod
+    def _steady_integer_argument(value, name: str) -> int:
+        """Return an exact integer argument without silently truncating it."""
+        if isinstance(value, (bool, np.bool_)):
+            raise TypeError(f"{name} must be an integer, not a boolean.")
+
+        try:
+            return int(operator.index(value))
+        except TypeError as exc:
+            raise TypeError(f"{name} must be an integer.") from exc
+
+    def _steady_generation_limit_message(
+        self,
+        max_generation_steps: int,
+        generated_this_call: int,
+    ) -> str:
+        """Build a diagnostic error message for a stopped pool-generation run."""
+        parts = [
+            "Steady state was not reached within "
+            f"max_generation_steps={int(max_generation_steps)} explicit rounds "
+            "generated by this call.",
+            "The allocator state has been preserved and the run can be resumed.",
+            f"generated_this_call={int(generated_this_call)}",
+            f"total_rounds={int(self.num_settings)}",
+            f"phase={self.steady_phase}",
+            f"W={int(self.steady_W)}",
+            f"unique_settings={len(self.measurement_scheme.settings_dict)}",
+        ]
+
+        if self.steady_last_tv_shared is not None:
+            parts.append(f"TV_shared={float(self.steady_last_tv_shared):.6g}")
+        if self.steady_last_tv_thresh is not None:
+            parts.append(f"TV_threshold={float(self.steady_last_tv_thresh):.6g}")
+        if self.steady_last_new_mass is not None:
+            parts.append(f"new_mass={float(self.steady_last_new_mass):.6g}")
+        if self.steady_last_new_mass_thresh is not None:
+            parts.append(
+                f"new_mass_threshold={float(self.steady_last_new_mass_thresh):.6g}"
+            )
+
+        return " ".join(parts)
+
     #  Tokenization / dict increments
     def _steady_tokenize(self, setting_indices) -> bytes:
         """
@@ -217,6 +319,26 @@ class SteadyStateAllocatorMixin:
 
         return
 
+    def _steady_advance_presteady_one_round(self, verbose=False):
+        """Generate one explicit round and process any resulting window boundary."""
+        if self.steady_reached:
+            raise RuntimeError(
+                "Cannot advance the pre-steady state after steady state has been reached."
+            )
+
+        self._steady_do_one_round_find_setting(track_window=True, verbose=verbose)
+
+        if self.steady_phase == "FIRST_WINDOW":
+            # End the first window once all observables have been measured >= 1.
+            if np.all(self.measurement_scheme.N_hits > 0):
+                self._steady_finalize_window(verbose=verbose)
+        else:
+            # All later windows have the current fixed size W.
+            if self.steady_W > 0 and self.steady_window_pos >= self.steady_W:
+                self._steady_finalize_window(verbose=verbose)
+
+        return
+
     #  Window logic / convergence
     def _steady_compute_S_eff(self, counts: dict, W: int) -> float:
         """
@@ -262,7 +384,7 @@ class SteadyStateAllocatorMixin:
             return
 
         # Fixed-size windows
-        assert self.steady_W > 0, "Internal error: steady_w must be > 0 outside FIRST_WINDOW."
+        assert self.steady_W > 0, "Internal error: steady_W must be > 0 outside FIRST_WINDOW."
 
         required = int(np.ceil((self.steady_c_beta ** 2) * self.steady_S_eff))
 

@@ -133,48 +133,42 @@ def _bernstein_empirical_audibert_core(delta, N_hits, w, is_hit_array, C, tighte
     eps_stat = np.sqrt(2.0 * log_term * V_emp) + 3.0 * log_term * B
     return eps_stat, eps_sys
 
-
 @njit
-def _chebyshev_tightest_core(delta, N_hits, N_hits_pairs, w, cov_real):
+def _chebyshev_tightest_core(N_hits, N_hits_pairs, w, cov_real):
+    """
+    Variance of the estimator restricted to observables with N_hits > 0:
+
+        Var = sum_{i,j} (w_i / N_i) N_ij Cov(P_i, P_j) (w_j / N_j).
+    """
     M = len(w)
 
-    # systematic error
-    eps_sys = 0.0
-    for i in range(M):
-        if N_hits[i] == 0:
-            wi = w[i]
-            eps_sys += wi if wi >= 0.0 else -wi
-
-    # effective weights
     w_eff = np.zeros(M, dtype=np.float64)
-    has_samples = False
+
     for i in range(M):
-        Ni = N_hits[i]
-        if Ni > 0:
-            w_eff[i] = w[i] / Ni
-            has_samples = True
+        if N_hits[i] > 0:
+            w_eff[i] = w[i] / N_hits[i]
 
-    if not has_samples:
-        return 0.0, eps_sys
+    variance = 0.0
 
-    # Var = sum_{i,j} w_eff[i] * N_hits_pairs[i,j] * cov_real[i,j] * w_eff[j]
-    Var = 0.0
     for i in range(M):
         wi = w_eff[i]
         if wi == 0.0:
             continue
+
         for j in range(M):
             wj = w_eff[j]
             if wj == 0.0:
                 continue
-            Var += wi * N_hits_pairs[i, j] * cov_real[i, j] * wj
-            
-    if Var < 0.0:
-        Var = 0.0
-    sigma = np.sqrt(Var)
-    eps_stat = sigma / np.sqrt(delta)
 
-    return eps_stat, eps_sys
+            variance += (
+                wi
+                * N_hits_pairs[i, j]
+                * cov_real[i, j]
+                * wj
+            )
+
+    return variance
+
 
 @njit
 def _chebyshev_tighter_core(delta, N_hits, N_hits_pairs, w):
@@ -1313,17 +1307,147 @@ def get_epsilon_Chebyshev_scalar_tightest(delta, N_hits, N_hits_pairs, w, cov_re
 
     return eps_stat + eps_sys
     
-def get_epsilon_Chebyshev_scalar_tightest_numba(delta, N_hits, N_hits_pairs, w, cov_real):
-    """Numba-accelerated Chebyshev bound."""
-    if not (0 < delta < 1):
-        raise ValueError("delta must be in the interval (0,1)")
+def get_epsilon_Chebyshev_scalar_tightest_numba(delta, N_hits, N_hits_pairs,
+                                                w, cov_real, expvals_real=None,
+                                                systematic_mode="l1",
+                                                certified_systematic_bound=None,
+                                                return_components=False):
+    """
+    Return a Chebyshev guarantee for the error between the truncated
+    empirical estimator and the full energy.
+
+    Parameters
+    ----------
+    delta : float
+        Failure probability, with 0 < delta < 1.
+
+    N_hits : array_like, shape (M,)
+        Number of samples available for each Pauli observable.
+
+    N_hits_pairs : array_like, shape (M, M)
+        Number of shared samples for every pair of observables.
+
+    w : array_like, shape (M,)
+        Pauli coefficients.
+
+    cov_real : array_like, shape (M, M)
+        Exact single-shot covariance matrix.
+
+    expvals_real : array_like, shape (M,), optional
+        Exact Pauli expectation values. Required when
+        systematic_mode == "exact_state".
+
+    systematic_mode : {"l1", "exact_state", "certified"}
+        "l1":
+            Use sum_{unmeasured i} |w_i|. This is state-independent.
+
+        "exact_state":
+            Use |sum_{unmeasured i} w_i <P_i>|. This is valid only
+            for the state whose exact expectation values were supplied.
+
+        "certified":
+            Use certified_systematic_bound, for example an independently
+            obtained operator-norm bound.
+
+    certified_systematic_bound : float, optional
+        User-supplied rigorous upper bound on the truncation bias.
+
+    return_components : bool
+        If True, also return the statistical and systematic components,
+        the signed truncation bias when available, and the variance.
+
+    Returns
+    -------
+    epsilon_total : float
+        Radius satisfying
+
+            Pr(|E_hat_truncated - E_full| > epsilon_total) <= delta.
+
+    components : dict, optional
+        Returned only when return_components=True.
+    """
+    if not (0.0 < delta < 1.0):
+        raise ValueError("delta must be in the interval (0, 1)")
 
     N_hits = np.asarray(N_hits, dtype=np.int64)
     N_hits_pairs = np.asarray(N_hits_pairs, dtype=np.float64)
     w = np.asarray(w, dtype=np.float64)
+    cov_real = np.asarray(cov_real, dtype=np.float64)
 
-    eps_stat, eps_sys = _chebyshev_tightest_core(delta, N_hits, N_hits_pairs, w, cov_real)
-    return eps_stat + eps_sys
+    M = len(w)
+
+    if N_hits.shape != (M,):
+        raise ValueError("N_hits must have shape (M,)")
+    if N_hits_pairs.shape != (M, M):
+        raise ValueError("N_hits_pairs must have shape (M, M)")
+    if cov_real.shape != (M, M):
+        raise ValueError("cov_real must have shape (M, M)")
+    if np.any(N_hits < 0):
+        raise ValueError("N_hits cannot contain negative entries")
+
+    omitted = N_hits == 0
+    truncation_bias = None
+
+    if systematic_mode == "l1":
+        # State-independent worst-case bound:
+        # |sum_i w_i <P_i>| <= sum_i |w_i|.
+        eps_sys = float(np.sum(np.abs(w[omitted])))
+
+    elif systematic_mode == "exact_state":
+        if expvals_real is None:
+            raise ValueError(
+                "expvals_real is required for systematic_mode='exact_state'"
+            )
+
+        expvals_real = np.asarray(expvals_real, dtype=np.float64)
+        if expvals_real.shape != (M,):
+            raise ValueError("expvals_real must have shape (M,)")
+
+        truncation_bias = float(np.dot(w[omitted], expvals_real[omitted]))
+        eps_sys = abs(truncation_bias)
+
+    elif systematic_mode == "certified":
+        if certified_systematic_bound is None:
+            raise ValueError(
+                "certified_systematic_bound is required for "
+                "systematic_mode='certified'"
+            )
+
+        eps_sys = float(certified_systematic_bound)
+        if eps_sys < 0.0:
+            raise ValueError(
+                "certified_systematic_bound must be nonnegative"
+            )
+
+    else:
+        raise ValueError(
+            "systematic_mode must be 'l1', 'exact_state', or 'certified'"
+        )
+
+    variance = _chebyshev_tightest_core(N_hits, N_hits_pairs, w, cov_real)
+
+    # A genuinely negative value indicates inconsistent covariance/hit data.
+    # Only a small floating-point residual should be clipped.
+    scale = max(1.0, np.max(np.abs(w)) ** 2)
+    tolerance = 1e-12 * scale
+
+    if variance < -tolerance:
+        raise ValueError(
+            "Computed variance is significantly negative. Check that "
+            "cov_real and N_hits_pairs describe a consistent sampling scheme.")
+
+    variance = max(variance, 0.0)
+    eps_stat = np.sqrt(variance / delta)
+    epsilon_total = eps_sys + eps_stat
+
+    if not return_components:
+        return epsilon_total
+
+    return epsilon_total, {
+        "epsilon_statistical": eps_stat,
+        "epsilon_systematic": eps_sys,
+        "truncation_bias": truncation_bias,
+        "variance": variance}
 
 def get_single_Hoeffding_plus_union_bound(epsilon, N_hits, w):
     """ Returns the delta such that the corresponding energy deviation is not larger than epsilon.

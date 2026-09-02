@@ -739,6 +739,48 @@ def get_epsilon_Chebyshev_scalar_tightest_numba(delta, N_hits, N_hits_pairs, w, 
 
 
 def get_diagonal_proxy_of_variance(N_hits, w):
-    if np.any(N_hits == 0):
-        raise ValueError("N_hits still has some zero values.")
-    return np.sum(w**2 / N_hits)
+    measured = N_hits > 0
+    unmeasured = N_hits == 0
+    return np.sum(w[measured]**2 / N_hits[measured]) + np.sum(w[unmeasured])**2
+
+
+def full_variance(delta, N_hits, N_hits_pairs, w, cov_real):
+    M = len(w)
+
+    # systematic error
+    eps_sys = 0.0
+    for i in range(M):
+        if N_hits[i] == 0:
+            wi = w[i]
+            eps_sys += wi**2
+
+    # effective weights
+    w_eff = np.zeros(M, dtype=np.float64)
+    has_samples = False
+    for i in range(M):
+        Ni = N_hits[i]
+        if Ni > 0:
+            w_eff[i] = w[i] / Ni
+            has_samples = True
+
+    if not has_samples:
+        return eps_sys
+
+    # Var = sum_{i,j} w_eff[i] * N_hits_pairs[i,j] * cov_real[i,j] * w_eff[j]
+    Var = 0.0
+    for i in range(M):
+        wi = w_eff[i]
+        if wi == 0.0:
+            continue
+        for j in range(M):
+            wj = w_eff[j]
+            if wj == 0.0:
+                continue
+            Var += wi * N_hits_pairs[i, j] * cov_real[i, j] * wj
+            
+    if Var < 0.0:
+        Var = 0.0
+    sigma = np.sqrt(Var)
+    eps_stat = sigma / np.sqrt(delta)
+
+    return eps_stat+eps_sys

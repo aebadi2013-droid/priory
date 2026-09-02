@@ -1,6 +1,7 @@
-import numpy as np
+import numpy as np, time
+from scipy.sparse import csr_matrix
 
-from shadowgrouping_v2.helper_functions import encode_setting_token
+from shadowgrouping_v2.shadowgrouping_my_dev.helper_functions import encode_setting_token
 
 class _AllocationMixin:
     """
@@ -27,8 +28,11 @@ class _AllocationMixin:
       - self.prior_counts
       - self.allocation_objective
       - self.attempt_truncation
-      - self.rounding_strategy
       - self.md_gap_tol_rel
+      - self.md_execution_mode
+      - self.md_max_time
+      - self.enable_pre_pruning
+      - self.verbose
       - self.truncation_num_candidates
       - self.truncation_min_active
 
@@ -85,27 +89,26 @@ class _AllocationMixin:
                 +
                 sum_{unmeasured j} |w_j|
 
-    Rounding strategies
-    -------------------
-    The concrete class may set
+    Independently of whether objective-level truncation is attempted, marginal
+    integer rounding uses the corresponding full post-rounded proxy. The final
+    statistical, truncation, coverage, and total-proxy diagnostics are stored in
+    ``self.post_rounded_proxy_info``.
 
-        self.rounding_strategy = "largest_fraction"
-
-    or
-
-        self.rounding_strategy = "marginal".
-
-    "largest_fraction" floors the relaxed allocation and gives leftover shots
-    to the groups with the largest fractional parts.
-
-    "marginal" floors the relaxed allocation and gives leftover shots one at a
-    time to the group with the largest finite-difference decrease in the current
-    objective. Selection is with replacement.
+    Integer rounding
+    ----------------
+    The relaxed allocation is floored and leftover shots are assigned one at a
+    time to the group with the largest finite-difference decrease in the full
+    post-rounded proxy, including the truncation penalty associated with every
+    positive-weight observable whose effective count is zero. Selection is with
+    replacement.
 
     Relaxed overlapping solver accuracy
     -----------------------------------
     The relaxed overlapping allocation problem is solved approximately using
-    exponentiated-gradient mirror descent on the simplex.
+    exponentiated-gradient mirror descent on the simplex with conservative
+    monotonic backtracking. The accepted step size is carried between iterations,
+    enlarged mildly after successful steps, and reduced when a trial point fails
+    to lower the relaxed objective.
 
     The convergence certificate is the relative Frank-Wolfe gap,
 
@@ -118,16 +121,21 @@ class _AllocationMixin:
     For convex minimization over the simplex, gap_FW upper-bounds the relaxed
     suboptimality F(K) - F(K*).
 
-    The concrete class may provide one user-facing accuracy parameter:
+    The concrete class may provide the following solver controls:
 
         self.md_gap_tol_rel
+        self.md_execution_mode = "default" | "until-converged" | "user-selected"
+        self.md_max_time       = positive seconds in "user-selected" mode
+        self.enable_pre_pruning
+        self.verbose
 
-    Recommended values:
+    Recommended md_gap_tol_rel values:
         1e-3 : fast optimization
         1e-4 : default
         1e-6 : high accuracy
 
-    All other mirror-descent parameters are hard-coded internally.
+    In verbose mode, progress is printed approximately every five seconds.
+    Other mirror-descent constants remain internal.
     """
 
     # ------------------------------------------------------------------
@@ -159,39 +167,24 @@ class _AllocationMixin:
                 f"self.w must have shape ({self.num_obs},), got {abs_coeffs.shape}."
             )
 
-        mode = str(getattr(self, "allocation_objective", "variance")).lower()
+        mode = str(
+            getattr(self, "allocation_objective", "variance")
+        ).strip().lower()
 
-        variance_aliases = {
-            "variance",
-            "l2",
-            "l2_squared",
-            "total_variance",
-            "diagonal_variance",
-        }
-
-        bernstein_aliases = {
-            "bernstein_l1",
-            "l1",
-            "shadow_l1",
-            "shadowgrouping_l1",
-            "bernstein",
-        }
-
-        if mode in variance_aliases:
+        if mode == "variance":
             objective_weights = abs_coeffs * abs_coeffs
             objective_power = 1.0
             objective_mode = "variance"
 
-        elif mode in bernstein_aliases:
+        elif mode == "bernstein_l1":
             objective_weights = abs_coeffs.copy()
             objective_power = 0.5
             objective_mode = "bernstein_l1"
 
         else:
             raise ValueError(
-                "allocation_objective must be one of "
-                "'variance' or 'bernstein_l1'. "
-                f"Got {mode!r}."
+                "allocation_objective must be either 'variance' or "
+                f"'bernstein_l1'. Got {mode!r}."
             )
 
         return abs_coeffs, objective_weights, objective_power, objective_mode
@@ -420,45 +413,6 @@ class _AllocationMixin:
     # Rounding helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _round_raw_allocation_largest_fraction(raw: np.ndarray, B: int) -> np.ndarray:
-        """
-        Floor a real-valued allocation and distribute leftover shots to the
-        largest fractional parts.
-        """
-        raw = np.asarray(raw, dtype=np.float64)
-        G = int(raw.size)
-
-        if G == 0:
-            return np.zeros(0, dtype=np.int64)
-
-        if B <= 0:
-            return np.zeros(G, dtype=np.int64)
-
-        raw = np.maximum(raw, 0.0)
-
-        s_raw = float(np.sum(raw))
-        if s_raw > 0.0:
-            raw = raw * (float(B) / s_raw)
-
-        reps = np.floor(raw).astype(np.int64)
-        leftover = int(B) - int(np.sum(reps))
-
-        if leftover < 0:
-            raise RuntimeError(
-                "Floor-rounded allocation exceeds the total budget. "
-                "This should not happen unless raw allocation is inconsistent."
-            )
-
-        if leftover > 0:
-            frac = raw - reps
-            order = np.argsort(-frac, kind="mergesort")
-
-            for i in range(leftover):
-                reps[order[i % G]] += 1
-
-        return reps
-
     def _round_raw_allocation_marginal(
         self,
         raw: np.ndarray,
@@ -468,10 +422,8 @@ class _AllocationMixin:
         objective_power: float,
         b: np.ndarray,
         *,
-        truncation_mode: bool = False,
         objective_mode: str = "variance",
         truncation_cost: np.ndarray | None = None,
-        zero_count_marginal: float = np.inf,
     ) -> np.ndarray:
         """
         Marginal-gain rounding for the leftover budget.
@@ -481,14 +433,16 @@ class _AllocationMixin:
 
             a_j * [N_j^{-p} - (N_j + 1)^{-p}].
 
-        Without truncation, zero-count positive-weight observables receive
-        infinite marginal value, reflecting the singular objective.
+        Zero-count positive-weight observables are handled through the same
+        post-rounded truncation penalty used to evaluate the final scheme:
 
-        With truncation:
-          - bernstein_l1 mode uses zero first-sample gain;
+          - bernstein_l1 mode uses the exact zero first-sample gain of
+
+                statistical_proxy + truncation_bias;
+
           - variance mode uses the exact group-level finite difference of
 
-                variance + truncation_bias^2.
+                statistical_proxy + truncation_bias^2.
         """
         raw = np.asarray(raw, dtype=np.float64)
         objective_weights = np.asarray(objective_weights, dtype=np.float64)
@@ -546,23 +500,10 @@ class _AllocationMixin:
                     (N_eff[measured] + 1.0) ** (-p)
                 )
 
-            zero_count = positive_weight & (N_eff <= 0.0)
-
-            if not truncation_mode:
-                if np.any(zero_count):
-                    marginal_obs[zero_count] = zero_count_marginal
-
-                group_scores = np.empty(G, dtype=np.float64)
-                for gg in range(G):
-                    group_scores[gg] = float(np.sum(marginal_obs[members[gg]]))
-
-            elif objective_mode == "bernstein_l1":
+            if objective_mode == "bernstein_l1":
                 # First sample changes |w_j| -> |w_j| / sqrt(1) = |w_j|,
                 # so the first-sample gain is zero under the linear
                 # statistical + truncation-bias proxy.
-                if np.any(zero_count):
-                    marginal_obs[zero_count] = 0.0
-
                 group_scores = np.empty(G, dtype=np.float64)
                 for gg in range(G):
                     group_scores[gg] = float(np.sum(marginal_obs[members[gg]]))
@@ -623,34 +564,22 @@ class _AllocationMixin:
         objective_power: float,
         b: np.ndarray,
         *,
-        truncation_mode: bool = False,
         objective_mode: str = "variance",
         truncation_cost: np.ndarray | None = None,
     ) -> np.ndarray:
         """
-        Dispatch integer rounding according to self.rounding_strategy.
+        Floor the relaxed allocation and assign every leftover shot by the
+        exact marginal decrease in the post-rounded energy proxy.
         """
-        strategy = str(getattr(self, "rounding_strategy", "largest_fraction")).lower()
-
-        if strategy == "largest_fraction":
-            return self._round_raw_allocation_largest_fraction(raw, B)
-
-        if strategy == "marginal":
-            return self._round_raw_allocation_marginal(
-                raw=raw,
-                B=B,
-                members=members,
-                objective_weights=objective_weights,
-                objective_power=objective_power,
-                b=b,
-                truncation_mode=truncation_mode,
-                objective_mode=objective_mode,
-                truncation_cost=truncation_cost,
-            )
-
-        raise ValueError(
-            "rounding_strategy must be either 'largest_fraction' or 'marginal'. "
-            f"Got {strategy!r}."
+        return self._round_raw_allocation_marginal(
+            raw=raw,
+            B=B,
+            members=members,
+            objective_weights=objective_weights,
+            objective_power=objective_power,
+            b=b,
+            objective_mode=objective_mode,
+            truncation_cost=truncation_cost,
         )
 
     @staticmethod
@@ -713,7 +642,7 @@ class _AllocationMixin:
 
             row = np.zeros(M, dtype=bool)
             row[clique] = True
-            #self._append_is_hit_row(row)
+            self._append_is_hit_row(row)
 
             self.N_hits[clique] += r
 
@@ -787,6 +716,83 @@ class _AllocationMixin:
 
         return total_proxy, stat_proxy, trunc_bias, measured
 
+    def _store_post_rounded_proxy_info(
+        self,
+        *,
+        abs_coeffs,
+        objective_weights,
+        objective_power,
+        objective_mode,
+        b,
+        members,
+        reps,
+        reason="allocation_completed",
+    ):
+        """
+        Evaluate and store diagnostics for the final integer allocation.
+
+        The measured set is defined from the effective counts
+
+            N_eff = prior_counts + newly_allocated_counts,
+
+        so the diagnostics capture rounding-induced truncation whether or not
+        objective-level truncation was requested.
+        """
+        reps = np.asarray(reps, dtype=np.int64).reshape(-1)
+        new_counts = self._counts_from_allocation(members, reps)
+
+        total_proxy, stat_proxy, trunc_bias, measured = (
+            self._energy_proxy_from_counts(
+                abs_coeffs=abs_coeffs,
+                objective_weights=objective_weights,
+                objective_power=objective_power,
+                objective_mode=objective_mode,
+                b=b,
+                new_counts=new_counts,
+            )
+        )
+
+        abs_coeffs = np.asarray(abs_coeffs, dtype=np.float64).reshape(-1)
+        positive = abs_coeffs > 0.0
+        measured_positive = positive & measured
+        unmeasured_positive = positive & ~measured
+
+        if str(objective_mode).lower() == "variance":
+            truncation_penalty = float(trunc_bias * trunc_bias)
+        else:
+            truncation_penalty = float(trunc_bias)
+
+        self.post_rounded_proxy_info = {
+            "available": True,
+            "reason": str(reason),
+            "allocation_objective": str(objective_mode),
+            "objective_power": float(objective_power),
+            "total_rounds_requested": int(self.total_rounds),
+            "num_rounds_allocated": int(np.sum(reps)),
+            "num_groups_considered": int(len(members)),
+            "num_groups_with_nonzero_reps": int(np.count_nonzero(reps > 0)),
+            "num_measured_observables": int(np.count_nonzero(measured)),
+            "num_unmeasured_observables": int(np.count_nonzero(~measured)),
+            "num_positive_weight_observables": int(np.count_nonzero(positive)),
+            "num_measured_positive_weight_observables": int(
+                np.count_nonzero(measured_positive)
+            ),
+            "num_truncated_positive_weight_observables": int(
+                np.count_nonzero(unmeasured_positive)
+            ),
+            "actual_truncation_after_rounding": bool(
+                np.any(unmeasured_positive)
+            ),
+            "stat_proxy": float(stat_proxy),
+            "trunc_bias": float(trunc_bias),
+            "truncation_bias_bound": float(trunc_bias),
+            "squared_truncation_bias_bound": float(trunc_bias * trunc_bias),
+            "truncation_penalty": float(truncation_penalty),
+            "total_proxy": float(total_proxy),
+        }
+
+        return self.post_rounded_proxy_info
+
     # ------------------------------------------------------------------
     # Truncation candidate generation
     # ------------------------------------------------------------------
@@ -859,20 +865,122 @@ class _AllocationMixin:
             minimize_K sum_j a_j / (b_j + B chi_j(K))^p
             subject to K_g >= 0, sum_g K_g = 1.
 
-        The solver is exponentiated-gradient mirror descent on the simplex.
-        Convergence is certified using the relative Frank-Wolfe gap.
+        The solver uses exponentiated-gradient mirror descent on the simplex
+        with conservative monotonic backtracking. Convergence is certified with
+        the relative Frank-Wolfe gap.
+
+        Execution modes
+        ---------------
+        ``self.md_execution_mode`` must be one of:
+
+          - ``"default"``:
+                At most 1000 mirror-descent updates per run. The solver uses an
+                initial run and, if needed, one step-size restart from the best
+                objective point found by the initial run.
+
+          - ``"until-converged"``:
+                One uninterrupted mirror-descent trajectory with no iteration or
+                wall-clock limit. The solver stops only after reaching the gap
+                target or encountering a genuine numerical failure.
+
+          - ``"user-selected"``:
+                One uninterrupted mirror-descent trajectory with no iteration
+                limit and a positive wall-clock limit ``self.md_max_time`` in
+                seconds. If the time limit is reached before convergence, the
+                returned point is the iterate with the smallest relative
+                Frank-Wolfe gap encountered during the run.
+
+        Optional concrete-class attributes
+        ----------------------------------
+        md_gap_tol_rel : float
+            Relative Frank-Wolfe-gap target. Default: 1e-4.
+        md_execution_mode : str
+            ``"default"``, ``"until-converged"``, or ``"user-selected"``.
+            Default: ``"default"``.
+        md_max_time : float or None
+            Positive time limit in seconds. Required only in
+            ``"user-selected"`` mode and rejected in the other modes.
+        enable_pre_pruning : bool
+            Whether to prune tiny warm-start weights before optimization.
+            Default: True.
+        verbose : bool
+            If True, print stage transitions and optimization progress at most
+            once every five seconds, as well as run and final summaries.
+
+        Notes
+        -----
+        There is deliberately no post-optimization pruning. The group pool is
+        fixed after optional pre-pruning, so the reported Frank-Wolfe certificate
+        applies to the same continuous allocation that is subsequently rounded.
+        Settings receiving zero integer repetitions are omitted naturally by
+        ``_commit_allocation``.
         """
-        # Hard-coded solver parameters.
-        md_iters = 1000
-        md_restarts = 3
+        # ------------------------------------------------------------------
+        # Hard-coded numerical policy.
+        # ------------------------------------------------------------------
+        md_default_max_iters_per_run = 1000
+        md_default_num_runs = 2  # initial run + one step-size restart
+
+        # Conservative backtracking policy. ``md_eta0`` fixes the scale of the
+        # first exponentiated-gradient step through eta_0 = md_eta0 / ||g_c||_inf,
+        # where g_c is the gradient centered by its K-weighted mean. After an
+        # accepted step, the next trial is mildly enlarged. Rejected trials are
+        # reduced geometrically until the objective strictly decreases.
         md_eta0 = 0.5
-        md_noise_sigma = 0.35
-        eps_chi = 1e-12
+        md_backtrack_factor = 0.5
+        md_growth_factor = 1.25
+        md_max_backtracking_trials = 50
+        md_min_eta_relative = 1e-14
+        md_max_eta_relative = 1e12
+
+        md_denominator_epsilon = 1e-12
         md_min_iters = 25
+        md_verbose_interval = 5.0
 
         md_gap_tol_rel = float(getattr(self, "md_gap_tol_rel", 1e-4))
-        if md_gap_tol_rel <= 0.0:
-            raise ValueError("md_gap_tol_rel must be positive.")
+        if not np.isfinite(md_gap_tol_rel) or md_gap_tol_rel <= 0.0:
+            raise ValueError("md_gap_tol_rel must be positive and finite.")
+
+        execution_mode = str(
+            getattr(self, "md_execution_mode", "default")
+        ).strip().lower()
+
+        valid_execution_modes = {
+            "default",
+            "until-converged",
+            "user-selected",
+        }
+        if execution_mode not in valid_execution_modes:
+            raise ValueError(
+                "md_execution_mode must be one of 'default', "
+                "'until-converged', or 'user-selected'. "
+                f"Got {execution_mode!r}."
+            )
+
+        md_max_time_attr = getattr(self, "md_max_time", None)
+        if execution_mode == "user-selected":
+            if md_max_time_attr is None:
+                raise ValueError(
+                    "md_max_time must be provided when "
+                    "md_execution_mode='user-selected'."
+                )
+            md_max_time = float(md_max_time_attr)
+            if not np.isfinite(md_max_time) or md_max_time <= 0.0:
+                raise ValueError(
+                    "md_max_time must be positive and finite when "
+                    "md_execution_mode='user-selected'."
+                )
+        else:
+            if md_max_time_attr is not None:
+                raise ValueError(
+                    "md_max_time is only active when "
+                    "md_execution_mode='user-selected'. Set it to None for "
+                    f"md_execution_mode={execution_mode!r}."
+                )
+            md_max_time = None
+
+        enable_pre_pruning = bool(getattr(self, "enable_pre_pruning", True))
+        verbose = bool(getattr(self, "verbose", False))
 
         B = int(B)
         M = int(self.num_obs)
@@ -889,7 +997,9 @@ class _AllocationMixin:
                 "convergence": None,
             }
 
-        objective_weights = np.asarray(objective_weights, dtype=np.float64).reshape(-1)
+        objective_weights = np.asarray(
+            objective_weights, dtype=np.float64
+        ).reshape(-1)
         b = np.asarray(b, dtype=np.float64).reshape(-1)
         p = float(objective_power)
 
@@ -903,81 +1013,154 @@ class _AllocationMixin:
         if truncation_cost is None:
             truncation_cost = np.zeros(M, dtype=np.float64)
         else:
-            truncation_cost = np.asarray(truncation_cost, dtype=np.float64).reshape(-1)
+            truncation_cost = np.asarray(
+                truncation_cost, dtype=np.float64
+            ).reshape(-1)
 
         if objective_weights.shape != (M,):
             raise ValueError(f"objective_weights must have shape ({M},).")
-
         if rounding_objective_weights.shape != (M,):
-            raise ValueError(f"rounding_objective_weights must have shape ({M},).")
-
+            raise ValueError(
+                f"rounding_objective_weights must have shape ({M},)."
+            )
         if truncation_cost.shape != (M,):
             raise ValueError(f"truncation_cost must have shape ({M},).")
-
         if b.shape != (M,):
             raise ValueError(f"b must have shape ({M},), got {b.shape}.")
-
         if np.any(objective_weights < -1e-14):
             raise ValueError("Objective weights must be nonnegative.")
-
         if np.any(rounding_objective_weights < -1e-14):
             raise ValueError("Rounding objective weights must be nonnegative.")
-
         if np.any(truncation_cost < -1e-14):
             raise ValueError("Truncation costs must be nonnegative.")
-
         if np.any(b < 0.0):
             raise ValueError("Prior counts must be nonnegative.")
-
         if p <= 0.0:
             raise ValueError("objective_power must be positive.")
 
         objective_weights = np.maximum(objective_weights, 0.0)
-        rounding_objective_weights = np.maximum(rounding_objective_weights, 0.0)
+        rounding_objective_weights = np.maximum(
+            rounding_objective_weights, 0.0
+        )
         truncation_cost = np.maximum(truncation_cost, 0.0)
+
+        solver_start_time = time.perf_counter()
+        deadline = (
+            solver_start_time + md_max_time
+            if execution_mode == "user-selected"
+            else None
+        )
+
+        def elapsed_time() -> float:
+            return float(time.perf_counter() - solver_start_time)
+
+        def vprint(message: str) -> None:
+            if verbose:
+                print(message, flush=True)
 
         if not np.any(objective_weights > 0.0):
             reps = self._uniform_reps(G, B)
-
+            elapsed = elapsed_time()
+            convergence = {
+                "converged": True,
+                "convergence_reason": "flat_objective",
+                "returned_solution_selection": "uniform-flat-objective",
+                "md_execution_mode": execution_mode,
+                "md_max_time": md_max_time,
+                "max_iters_per_run": (
+                    md_default_max_iters_per_run
+                    if execution_mode == "default"
+                    else None
+                ),
+                "elapsed_time": elapsed,
+                "iterations": 0,
+                "total_iterations": 0,
+                "objective": None,
+                "frank_wolfe_gap": 0.0,
+                "relative_frank_wolfe_gap": 0.0,
+                "md_gap_tol_rel": float(md_gap_tol_rel),
+                "best_objective_encountered": None,
+                "relative_gap_at_best_objective": 0.0,
+                "best_gap_encountered": 0.0,
+                "best_relative_gap_encountered": 0.0,
+                "objective_at_best_gap": None,
+                "pre_pruning_enabled": enable_pre_pruning,
+                "num_groups_initial": G,
+                "num_groups_after_pre_pruning": G,
+                "num_groups_after_post_pruning": G,
+                "post_pruning_applied": False,
+                "post_pruning_changed_pool": False,
+                "num_step_size_restarts": 0,
+                "num_random_restarts": 0,
+                "denominator_regularization": float(
+                    md_denominator_epsilon
+                ),
+                "incidence_matrix_nnz": 0,
+                "verbose_progress_interval": float(md_verbose_interval),
+                "runs": [],
+            }
+            vprint(
+                "[allocation][done] converged=True reason=flat_objective "
+                f"elapsed={elapsed:.2f}s total_iter=0"
+            )
             return tokens, members, reps, {
                 "relaxed_objective": None,
                 "num_groups": G,
                 "flat_objective": True,
-                "convergence": {
-                    "converged": True,
-                    "convergence_reason": "flat_objective",
-                    "frank_wolfe_gap": 0.0,
-                    "relative_frank_wolfe_gap": 0.0,
-                    "md_gap_tol_rel": float(md_gap_tol_rel),
-                },
+                "convergence": convergence,
             }
 
         prune_tol = max(1e-8, 0.25 / float(max(B, 1)))
-        rng = np.random.default_rng(0)
+        num_groups_initial = G
 
-        # Warm start: for non-overlapping no-prior power-law problems, the
-        # natural scaling is x_g ∝ (sum_j a_j)^{1/(p+1)}.
+        vprint(
+            "[allocation][start] "
+            f"groups={G} observables={M} budget={B} "
+            f"mode={execution_mode} target_rel_FW_gap={md_gap_tol_rel:.3e} "
+            f"pre_pruning={enable_pre_pruning}"
+            + (
+                f" max_time={md_max_time:.3f}s"
+                if execution_mode == "user-selected"
+                else ""
+            )
+        )
+
+        # Warm start.
         Wg = np.zeros(G, dtype=np.float64)
         for gg in range(G):
             Wg[gg] = float(np.sum(objective_weights[members[gg]]))
 
         sg = np.maximum(Wg, 0.0) ** (1.0 / (p + 1.0))
-
         if float(np.sum(sg)) <= 0.0:
             K0 = np.full(G, 1.0 / G, dtype=np.float64)
         else:
             K0 = (sg / float(np.sum(sg))).astype(np.float64)
 
-        tokens, members, K0 = self._safe_prune_with_priors(
-            tokens,
-            members,
-            K0,
-            objective_weights,
-            b,
-            prune_tol,
-        )
+        if enable_pre_pruning:
+            groups_before = len(members)
+            tokens, members, K0 = self._safe_prune_with_priors(
+                tokens,
+                members,
+                K0,
+                objective_weights,
+                b,
+                prune_tol,
+            )
+            groups_after = len(members)
+            vprint(
+                "[allocation][pre-pruning] "
+                f"enabled=True groups_before={groups_before} "
+                f"groups_after={groups_after} prune_tol={prune_tol:.3e}"
+            )
+        else:
+            vprint(
+                "[allocation][pre-pruning] "
+                f"enabled=False groups_before={len(members)} "
+                f"groups_after={len(members)}"
+            )
 
         G = len(members)
+        num_groups_after_pre_pruning = G
         if G == 0:
             return [], [], np.zeros(0, dtype=np.int64), {
                 "relaxed_objective": None,
@@ -986,187 +1169,784 @@ class _AllocationMixin:
                 "convergence": None,
             }
 
+        # Build the observable-setting incidence matrix once.
+        group_sizes = np.fromiter(
+            (int(mem.size) for mem in members),
+            dtype=np.int64,
+            count=G,
+        )
+        incidence_nnz = int(np.sum(group_sizes))
+
+        if incidence_nnz > 0:
+            incidence_rows = np.concatenate(members).astype(
+                np.int32, copy=False
+            )
+            incidence_cols = np.repeat(
+                np.arange(G, dtype=np.int32), group_sizes
+            )
+            incidence_data = np.ones(incidence_nnz, dtype=np.float64)
+        else:
+            incidence_rows = np.zeros(0, dtype=np.int32)
+            incidence_cols = np.zeros(0, dtype=np.int32)
+            incidence_data = np.zeros(0, dtype=np.float64)
+
+        incidence_matrix = csr_matrix(
+            (incidence_data, (incidence_rows, incidence_cols)),
+            shape=(M, G),
+            dtype=np.float64,
+        )
+        incidence_matrix.sum_duplicates()
+        incidence_matrix.sort_indices()
+        incidence_matrix_T = incidence_matrix.transpose().tocsr()
+
+        def eval_objective_state(K):
+            """
+            Evaluate the relaxed objective and retain its regularized denominator.
+
+            The denominator is returned so that, after a trial point is accepted,
+            its gradient can be computed without repeating the sparse product C K.
+            """
+            K = np.asarray(K, dtype=np.float64)
+            chi = np.asarray(incidence_matrix @ K).reshape(-1)
+            denom_regularized = b + B * chi + md_denominator_epsilon
+            obj = float(
+                np.sum(objective_weights / (denom_regularized ** p))
+            )
+            return obj, denom_regularized
+
+        def gradient_from_denominator(denom_regularized):
+            inv = (
+                B
+                * p
+                * objective_weights
+                / (denom_regularized ** (p + 1.0))
+            )
+            return -np.asarray(incidence_matrix_T @ inv).reshape(-1)
+
         def eval_obj_and_grad(K):
-            chi = np.zeros(M, dtype=np.float64)
-            for gg in range(G):
-                chi[members[gg]] += K[gg]
-
-            denom = b + B * chi
-            denom_safe = np.maximum(denom, eps_chi)
-
-            obj = float(np.sum(objective_weights / (denom_safe ** p)))
-
-            # d/dK_g [a_j / (b_j + B chi_j)^p]
-            #   = -B p a_j / (b_j + B chi_j)^(p+1).
-            inv = (B * p * objective_weights) / (denom_safe ** (p + 1.0))
-
-            grad = np.empty(G, dtype=np.float64)
-            for gg in range(G):
-                grad[gg] = -float(np.sum(inv[members[gg]]))
-
+            obj, denom_regularized = eval_objective_state(K)
+            grad = gradient_from_denominator(denom_regularized)
             return obj, grad
 
-        def mirror_descent(K_init):
-            K = K_init.copy()
+        def exponentiated_trial(K, grad, eta):
+            """
+            Stable exponentiated-gradient trial point on the probability simplex.
 
-            obj0, grad0 = eval_obj_and_grad(K)
-            gap0 = self._simplex_frank_wolfe_gap(K, grad0)
+            Subtracting the K-weighted mean of the gradient does not alter the
+            normalized exponentiated update, but it reduces the dynamic range of
+            the logits. The log-domain implementation avoids overflow for large
+            trial step sizes.
+            """
+            K = np.asarray(K, dtype=np.float64)
+            grad = np.asarray(grad, dtype=np.float64)
 
-            best_K = K.copy()
-            best_obj = float(obj0)
-            best_gap = float(gap0)
-            best_rel_gap = float(gap0 / max(abs(float(obj0)), 1e-300))
-            best_iter = 0
+            grad_center = float(np.dot(K, grad))
+            centered_grad = grad - grad_center
 
-            convergence_reason = "max_iters"
+            logits = np.log(np.maximum(K, 1e-300)) - eta * centered_grad
+            logits -= float(np.max(logits))
 
-            for t in range(md_iters):
-                obj, grad = eval_obj_and_grad(K)
-                gap = self._simplex_frank_wolfe_gap(K, grad)
+            K_trial = np.exp(logits)
+            K_trial = np.maximum(K_trial, 1e-300)
+            K_sum = float(np.sum(K_trial))
 
-                scale = max(abs(float(obj)), abs(float(obj0)), 1e-300)
-                rel_gap = gap / scale
+            if not np.isfinite(K_sum) or K_sum <= 0.0:
+                return None
 
-                if obj < best_obj:
-                    best_obj = float(obj)
-                    best_K = K.copy()
-                    best_gap = float(gap)
-                    best_rel_gap = float(rel_gap)
-                    best_iter = int(t)
+            K_trial /= K_sum
+            return K_trial
 
-                if t >= md_min_iters and rel_gap <= md_gap_tol_rel:
-                    convergence_reason = "frank_wolfe_gap"
+        progress_state = {"last_progress_print_time": None}
+        total_iterations = 0
+        all_run_records = []
+        total_step_size_restarts = 0
 
-                    best_obj = float(obj)
-                    best_K = K.copy()
-                    best_gap = float(gap)
-                    best_rel_gap = float(rel_gap)
-                    best_iter = int(t)
+        def relative_gap(obj: float, gap: float, scale_reference: float) -> float:
+            scale = max(abs(float(obj)), abs(float(scale_reference)), 1e-300)
+            return float(gap / scale)
+
+        def print_progress(
+            *,
+            run_label,
+            iteration,
+            total_iteration,
+            obj,
+            gap,
+            rel_gap,
+            run_best_rel_gap,
+            stage_best_rel_gap,
+            accepted_eta,
+            last_backtracks,
+            total_rejected_trials,
+            force=False,
+        ):
+            if not verbose:
+                return
+
+            now = time.perf_counter()
+            last = progress_state["last_progress_print_time"]
+            if not force and last is not None and now - last < md_verbose_interval:
+                return
+
+            eta_text = "none" if accepted_eta is None else f"{accepted_eta:.3e}"
+
+            print(
+                f"[allocation][optimization][{run_label}] "
+                f"iter={iteration} total_iter={total_iteration} "
+                f"elapsed={elapsed_time():.2f}s objective={obj:.8e} "
+                f"FW_gap={gap:.3e} rel_FW_gap={rel_gap:.3e} "
+                f"run_best_rel_FW_gap={run_best_rel_gap:.3e} "
+                f"stage_best_rel_FW_gap={stage_best_rel_gap:.3e} "
+                f"target={md_gap_tol_rel:.3e} "
+                f"current_target_ratio={rel_gap / md_gap_tol_rel:.3g} "
+                f"run_best_target_ratio="
+                f"{run_best_rel_gap / md_gap_tol_rel:.3g} "
+                f"stage_best_target_ratio="
+                f"{stage_best_rel_gap / md_gap_tol_rel:.3g} "
+                f"eta={eta_text} last_backtracks={last_backtracks} "
+                f"rejected_trials={total_rejected_trials}",
+                flush=True,
+            )
+            progress_state["last_progress_print_time"] = now
+
+        def mirror_descent(
+            K_init,
+            *,
+            run_label,
+            scale_reference,
+            stage_best_rel_gap_before_run,
+            total_iterations_before,
+            max_iters,
+            deadline,
+            stop_selection,
+        ):
+            """
+            Run one exponentiated-gradient trajectory with monotonic backtracking.
+
+            ``iterations`` counts accepted mirror-descent steps. Rejected trial
+            points are recorded separately and do not consume the default-mode
+            iteration allowance.
+
+            stop_selection controls which incumbent is returned if the gap target
+            is not reached:
+              - "best-objective" for the bounded default mode;
+              - "best-relative-fw-gap" for time/numerical termination.
+            """
+            K = np.asarray(K_init, dtype=np.float64).copy()
+            K = np.maximum(K, 1e-300)
+            K /= float(np.sum(K))
+
+            run_start_time = time.perf_counter()
+            iterations = 0
+
+            obj, denom_regularized = eval_objective_state(K)
+            if not np.isfinite(obj):
+                return K, K, K, {
+                    "converged": False,
+                    "termination_reason": "nonfinite_objective",
+                    "returned_solution_selection": "initial-point",
+                    "iterations": 0,
+                    "elapsed_time": float(
+                        time.perf_counter() - run_start_time
+                    ),
+                    "initial_objective": float(obj),
+                    "objective": float(obj),
+                    "frank_wolfe_gap": float("inf"),
+                    "relative_frank_wolfe_gap": float("inf"),
+                    "best_objective_encountered": float(obj),
+                    "gap_at_best_objective": float("inf"),
+                    "relative_gap_at_best_objective": float("inf"),
+                    "best_gap_encountered": float("inf"),
+                    "best_relative_gap_encountered": float("inf"),
+                    "objective_at_best_gap": float(obj),
+                    "step_size_strategy": "monotonic-backtracking",
+                    "accepted_steps": 0,
+                    "objective_trial_evaluations": 0,
+                    "rejected_backtracking_trials": 0,
+                }
+
+            grad = gradient_from_denominator(denom_regularized)
+            if not np.all(np.isfinite(grad)):
+                return K, K, K, {
+                    "converged": False,
+                    "termination_reason": "nonfinite_gradient",
+                    "returned_solution_selection": "initial-point",
+                    "iterations": 0,
+                    "elapsed_time": float(
+                        time.perf_counter() - run_start_time
+                    ),
+                    "initial_objective": float(obj),
+                    "objective": float(obj),
+                    "frank_wolfe_gap": float("inf"),
+                    "relative_frank_wolfe_gap": float("inf"),
+                    "best_objective_encountered": float(obj),
+                    "gap_at_best_objective": float("inf"),
+                    "relative_gap_at_best_objective": float("inf"),
+                    "best_gap_encountered": float("inf"),
+                    "best_relative_gap_encountered": float("inf"),
+                    "objective_at_best_gap": float(obj),
+                    "step_size_strategy": "monotonic-backtracking",
+                    "accepted_steps": 0,
+                    "objective_trial_evaluations": 0,
+                    "rejected_backtracking_trials": 0,
+                }
+
+            gap = self._simplex_frank_wolfe_gap(K, grad)
+            rel_gap = relative_gap(obj, gap, scale_reference)
+
+            initial_objective = float(obj)
+            initial_gap = float(gap)
+            initial_rel_gap = float(rel_gap)
+
+            best_objective = float(obj)
+            best_objective_K = K.copy()
+            gap_at_best_objective = float(gap)
+            rel_gap_at_best_objective = float(rel_gap)
+            best_objective_iteration = 0
+
+            best_gap_encountered = float(gap)
+            best_relative_gap_encountered = float(rel_gap)
+            best_gap_K = K.copy()
+            objective_at_best_gap = float(obj)
+            best_gap_iteration = 0
+
+            # The centered gradient is the relevant scale because adding a
+            # constant to every gradient component leaves the normalized
+            # exponentiated-gradient update unchanged.
+            centered_grad = grad - float(np.dot(K, grad))
+            grad_scale = max(float(np.max(np.abs(centered_grad))), 1e-12)
+            initial_eta = float(md_eta0 / grad_scale)
+            eta_floor = max(
+                np.finfo(np.float64).tiny,
+                initial_eta * md_min_eta_relative,
+            )
+            eta_cap = max(initial_eta, initial_eta * md_max_eta_relative)
+            next_eta_trial = initial_eta
+
+            accepted_eta = None
+            min_accepted_eta = float("inf")
+            max_accepted_eta = 0.0
+            final_accepted_eta = None
+            line_search_trial_attempts = 0
+            objective_trial_evaluations = 0
+            rejected_backtracking_trials = 0
+            max_trials_in_one_step = 0
+            last_backtracks = 0
+
+            print_progress(
+                run_label=run_label,
+                iteration=0,
+                total_iteration=total_iterations_before,
+                obj=obj,
+                gap=gap,
+                rel_gap=rel_gap,
+                run_best_rel_gap=best_relative_gap_encountered,
+                stage_best_rel_gap=min(
+                    stage_best_rel_gap_before_run,
+                    best_relative_gap_encountered,
+                ),
+                accepted_eta=None,
+                last_backtracks=0,
+                total_rejected_trials=0,
+                force=True,
+            )
+
+            termination_reason = None
+
+            while True:
+                if iterations >= md_min_iters and rel_gap <= md_gap_tol_rel:
+                    termination_reason = "frank_wolfe_gap"
                     break
 
-                gmax = float(np.max(np.abs(grad))) + 1e-12
-                eta = md_eta0 / (np.sqrt(t + 1.0) * gmax)
+                if max_iters is not None and iterations >= max_iters:
+                    termination_reason = "max_iters"
+                    break
 
-                step = np.clip(-eta * grad, -50.0, 50.0)
+                if deadline is not None and time.perf_counter() >= deadline:
+                    termination_reason = "time_limit"
+                    break
 
-                K *= np.exp(step)
-                K = np.maximum(K, 1e-300)
-                K /= float(np.sum(K))
+                eta_trial = min(next_eta_trial, eta_cap)
+                trial_accepted = False
+                trial_failure_reason = None
+                trials_this_step = 0
+                last_backtracks = 0
 
-            final_obj, final_grad = eval_obj_and_grad(best_K)
-            final_gap = self._simplex_frank_wolfe_gap(best_K, final_grad)
-            final_scale = max(abs(float(final_obj)), abs(float(obj0)), 1e-300)
-            final_rel_gap = final_gap / final_scale
+                while trials_this_step < md_max_backtracking_trials:
+                    if deadline is not None and time.perf_counter() >= deadline:
+                        trial_failure_reason = "time_limit"
+                        break
+
+                    if eta_trial < eta_floor or not np.isfinite(eta_trial):
+                        trial_failure_reason = "line_search_failed"
+                        break
+
+                    K_trial = exponentiated_trial(K, grad, eta_trial)
+                    trials_this_step += 1
+                    line_search_trial_attempts += 1
+
+                    if K_trial is None or not np.all(np.isfinite(K_trial)):
+                        rejected_backtracking_trials += 1
+                        last_backtracks += 1
+                        eta_trial *= md_backtrack_factor
+                        continue
+
+                    trial_obj, trial_denom = eval_objective_state(K_trial)
+                    objective_trial_evaluations += 1
+
+                    # Stage 1 uses the deliberately conservative acceptance
+                    # rule F(K_trial) < F(K). For the smooth convex objective,
+                    # a sufficiently small positive step is a descent step unless
+                    # the current point is stationary up to floating-point error.
+                    if np.isfinite(trial_obj) and trial_obj < obj:
+                        trial_accepted = True
+                        break
+
+                    rejected_backtracking_trials += 1
+                    last_backtracks += 1
+                    eta_trial *= md_backtrack_factor
+
+                max_trials_in_one_step = max(
+                    max_trials_in_one_step, trials_this_step
+                )
+
+                if not trial_accepted:
+                    termination_reason = (
+                        trial_failure_reason
+                        if trial_failure_reason is not None
+                        else "line_search_failed"
+                    )
+                    break
+
+                K = K_trial
+                obj = float(trial_obj)
+                grad = gradient_from_denominator(trial_denom)
+                if not np.all(np.isfinite(grad)):
+                    termination_reason = "nonfinite_gradient"
+                    break
+
+                iterations += 1
+                accepted_eta = float(eta_trial)
+                final_accepted_eta = accepted_eta
+                min_accepted_eta = min(min_accepted_eta, accepted_eta)
+                max_accepted_eta = max(max_accepted_eta, accepted_eta)
+
+                # Carry the accepted step forward and test a mildly larger one
+                # at the next accepted iteration.
+                next_eta_trial = min(
+                    accepted_eta * md_growth_factor,
+                    eta_cap,
+                )
+
+                gap = self._simplex_frank_wolfe_gap(K, grad)
+                rel_gap = relative_gap(obj, gap, scale_reference)
+
+                if obj < best_objective:
+                    best_objective = float(obj)
+                    best_objective_K = K.copy()
+                    gap_at_best_objective = float(gap)
+                    rel_gap_at_best_objective = float(rel_gap)
+                    best_objective_iteration = int(iterations)
+
+                if rel_gap < best_relative_gap_encountered:
+                    best_gap_encountered = float(gap)
+                    best_relative_gap_encountered = float(rel_gap)
+                    best_gap_K = K.copy()
+                    objective_at_best_gap = float(obj)
+                    best_gap_iteration = int(iterations)
+
+                print_progress(
+                    run_label=run_label,
+                    iteration=iterations,
+                    total_iteration=total_iterations_before + iterations,
+                    obj=obj,
+                    gap=gap,
+                    rel_gap=rel_gap,
+                    run_best_rel_gap=best_relative_gap_encountered,
+                    stage_best_rel_gap=min(
+                        stage_best_rel_gap_before_run,
+                        best_relative_gap_encountered,
+                    ),
+                    accepted_eta=accepted_eta,
+                    last_backtracks=last_backtracks,
+                    total_rejected_trials=rejected_backtracking_trials,
+                    force=False,
+                )
+
+            converged = bool(best_relative_gap_encountered <= md_gap_tol_rel)
+            if converged:
+                termination_reason = "frank_wolfe_gap"
+                selected_K = best_gap_K.copy()
+                selected_label = "best-relative-fw-gap"
+            elif stop_selection == "best-relative-fw-gap":
+                selected_K = best_gap_K.copy()
+                selected_label = "best-relative-fw-gap"
+            else:
+                selected_K = best_objective_K.copy()
+                selected_label = "best-objective"
+
+            final_obj, final_grad = eval_obj_and_grad(selected_K)
+            if np.isfinite(final_obj) and np.all(np.isfinite(final_grad)):
+                final_gap = self._simplex_frank_wolfe_gap(
+                    selected_K, final_grad
+                )
+                final_rel_gap = relative_gap(
+                    final_obj, final_gap, scale_reference
+                )
+            else:
+                final_gap = float("inf")
+                final_rel_gap = float("inf")
+
+            run_elapsed = float(time.perf_counter() - run_start_time)
+            accepted_steps = int(iterations)
+            mean_trials = (
+                float(objective_trial_evaluations) / accepted_steps
+                if accepted_steps > 0
+                else 0.0
+            )
 
             info = {
                 "converged": bool(final_rel_gap <= md_gap_tol_rel),
-                "convergence_reason": (
-                    convergence_reason
-                    if final_rel_gap <= md_gap_tol_rel
-                    else "max_iters"
-                ),
-                "iterations": int(t + 1),
-                "best_iter": int(best_iter),
-                "initial_objective": float(obj0),
+                "termination_reason": termination_reason,
+                "returned_solution_selection": selected_label,
+                "iterations": accepted_steps,
+                "elapsed_time": run_elapsed,
+                "initial_objective": initial_objective,
+                "initial_frank_wolfe_gap": initial_gap,
+                "initial_relative_frank_wolfe_gap": initial_rel_gap,
                 "objective": float(final_obj),
                 "frank_wolfe_gap": float(final_gap),
                 "relative_frank_wolfe_gap": float(final_rel_gap),
-                "md_gap_tol_rel": float(md_gap_tol_rel),
-                "best_gap_during_run": float(best_gap),
-                "best_relative_gap_during_run": float(best_rel_gap),
+                "best_objective_encountered": float(best_objective),
+                "best_objective_iteration": int(best_objective_iteration),
+                "gap_at_best_objective": float(gap_at_best_objective),
+                "relative_gap_at_best_objective": float(
+                    rel_gap_at_best_objective
+                ),
+                "best_gap_encountered": float(best_gap_encountered),
+                "best_relative_gap_encountered": float(
+                    best_relative_gap_encountered
+                ),
+                "objective_at_best_gap": float(objective_at_best_gap),
+                "best_gap_iteration": int(best_gap_iteration),
+                "step_size_strategy": "monotonic-backtracking",
+                "initial_step_size": float(initial_eta),
+                "final_accepted_step_size": (
+                    None
+                    if final_accepted_eta is None
+                    else float(final_accepted_eta)
+                ),
+                "min_accepted_step_size": (
+                    None
+                    if not np.isfinite(min_accepted_eta)
+                    else float(min_accepted_eta)
+                ),
+                "max_accepted_step_size": float(max_accepted_eta),
+                "accepted_steps": accepted_steps,
+                "line_search_trial_attempts": int(
+                    line_search_trial_attempts
+                ),
+                "objective_trial_evaluations": int(
+                    objective_trial_evaluations
+                ),
+                "rejected_backtracking_trials": int(
+                    rejected_backtracking_trials
+                ),
+                "mean_trials_per_accepted_step": float(mean_trials),
+                "max_trials_in_one_step": int(max_trials_in_one_step),
+                "backtrack_factor": float(md_backtrack_factor),
+                "growth_factor": float(md_growth_factor),
+                "max_backtracking_trials": int(
+                    md_max_backtracking_trials
+                ),
             }
+            return selected_K, best_objective_K, best_gap_K, info
 
-            return float(final_obj), best_K, info
+        # Evaluate the fixed scale reference once at the deterministic warm start.
+        stage_initial_obj, stage_initial_grad = eval_obj_and_grad(K0)
+        if not np.isfinite(stage_initial_obj):
+            raise FloatingPointError(
+                "The initial overlapping-allocation objective is non-finite."
+            )
+        if not np.all(np.isfinite(stage_initial_grad)):
+            raise FloatingPointError(
+                "The initial overlapping-allocation gradient is non-finite."
+            )
 
-        best_obj = float("inf")
-        best_K = K0.copy()
-        best_info = None
+        scale_reference = float(stage_initial_obj)
+        stage_initial_gap = self._simplex_frank_wolfe_gap(
+            K0, stage_initial_grad
+        )
+        stage_initial_rel_gap = relative_gap(
+            stage_initial_obj, stage_initial_gap, scale_reference
+        )
 
-        for r in range(md_restarts):
-            if r == 0:
-                K_init = K0
+        stage_best_objective = float(stage_initial_obj)
+        stage_best_objective_K = K0.copy()
+        stage_gap_at_best_objective = float(stage_initial_gap)
+        stage_rel_gap_at_best_objective = float(stage_initial_rel_gap)
+
+        stage_best_gap = float(stage_initial_gap)
+        stage_best_rel_gap = float(stage_initial_rel_gap)
+        stage_best_gap_K = K0.copy()
+        stage_objective_at_best_gap = float(stage_initial_obj)
+
+        if execution_mode == "default":
+            num_runs = md_default_num_runs
+            max_iters_per_run = md_default_max_iters_per_run
+            stop_selection = "best-objective"
+        else:
+            num_runs = 1
+            max_iters_per_run = None
+            stop_selection = "best-relative-fw-gap"
+
+        selected_K = K0.copy()
+        selected_reason = None
+        selected_label = None
+
+        for run_index in range(num_runs):
+            if run_index == 0:
+                K_init = K0.copy()
+                run_type = "initial"
+                run_label = "initial"
+                initialization = "deterministic-warm-start"
             else:
-                noise = rng.normal(loc=0.0, scale=md_noise_sigma, size=G)
-                K_init = K0 * np.exp(noise)
-                K_init = np.maximum(K_init, 1e-300)
-                K_init /= float(np.sum(K_init))
+                K_init = stage_best_objective_K.copy()
+                run_type = "step-size-restart"
+                run_label = f"step-restart-{run_index}"
+                initialization = "stage-best-objective"
+                total_step_size_restarts += 1
 
-            obj_r, K_r, info_r = mirror_descent(K_init)
-            info_r["restart"] = int(r)
+            vprint(
+                f"[allocation][optimization][{run_label}] "
+                f"starting run={run_index} type={run_type} "
+                f"initialization={initialization} groups={G} "
+                f"stage_best_target_ratio="
+                f"{stage_best_rel_gap / md_gap_tol_rel:.3g}"
+            )
 
-            if obj_r < best_obj:
-                best_obj = float(obj_r)
-                best_K = K_r
-                best_info = info_r
+            (
+                run_selected_K,
+                run_best_objective_K,
+                run_best_gap_K,
+                run_info,
+            ) = mirror_descent(
+                K_init,
+                run_label=run_label,
+                scale_reference=scale_reference,
+                stage_best_rel_gap_before_run=stage_best_rel_gap,
+                total_iterations_before=total_iterations,
+                max_iters=max_iters_per_run,
+                deadline=deadline,
+                stop_selection=stop_selection,
+            )
 
-            if info_r.get("converged", False):
+            run_info = dict(run_info)
+            run_info.update(
+                {
+                    "stage": "optimization",
+                    "run_index": int(run_index),
+                    "run_type": run_type,
+                    "run_label": run_label,
+                    "initialization": initialization,
+                }
+            )
+            all_run_records.append(run_info)
+            total_iterations += int(run_info["iterations"])
+
+            if run_info["best_objective_encountered"] < stage_best_objective:
+                stage_best_objective = float(
+                    run_info["best_objective_encountered"]
+                )
+                stage_best_objective_K = run_best_objective_K.copy()
+                stage_gap_at_best_objective = float(
+                    run_info["gap_at_best_objective"]
+                )
+                stage_rel_gap_at_best_objective = float(
+                    run_info["relative_gap_at_best_objective"]
+                )
+
+            if run_info["best_relative_gap_encountered"] < stage_best_rel_gap:
+                stage_best_gap = float(run_info["best_gap_encountered"])
+                stage_best_rel_gap = float(
+                    run_info["best_relative_gap_encountered"]
+                )
+                stage_best_gap_K = run_best_gap_K.copy()
+                stage_objective_at_best_gap = float(
+                    run_info["objective_at_best_gap"]
+                )
+
+            run_final_eta = run_info.get("final_accepted_step_size", None)
+            run_final_eta_text = (
+                "none" if run_final_eta is None else f"{run_final_eta:.3e}"
+            )
+            vprint(
+                f"[allocation][optimization][{run_label}][done] "
+                f"reason={run_info['termination_reason']} "
+                f"converged={run_info['converged']} "
+                f"iterations={run_info['iterations']} "
+                f"objective={run_info['objective']:.8e} "
+                f"rel_FW_gap={run_info['relative_frank_wolfe_gap']:.3e} "
+                f"run_best_target_ratio="
+                f"{run_info['best_relative_gap_encountered'] / md_gap_tol_rel:.3g} "
+                f"stage_best_target_ratio="
+                f"{stage_best_rel_gap / md_gap_tol_rel:.3g} "
+                f"final_eta={run_final_eta_text} "
+                f"trial_evals={run_info.get('objective_trial_evaluations', 0)} "
+                f"rejected_trials="
+                f"{run_info.get('rejected_backtracking_trials', 0)}"
+            )
+
+            selected_K = run_selected_K.copy()
+            selected_reason = str(run_info["termination_reason"])
+            selected_label = str(run_info["returned_solution_selection"])
+
+            if run_info["converged"]:
+                selected_K = stage_best_gap_K.copy()
+                selected_reason = "frank_wolfe_gap"
+                selected_label = "best-relative-fw-gap"
                 break
 
-        tokens, members, best_K = self._safe_prune_with_priors(
-            tokens,
-            members,
-            best_K,
-            objective_weights,
-            b,
-            prune_tol,
-        )
+            if selected_reason in {
+                "time_limit",
+                "nonfinite_objective",
+                "nonfinite_gradient",
+                "nonfinite_iterate",
+                "line_search_failed",
+            }:
+                selected_K = stage_best_gap_K.copy()
+                selected_label = "best-relative-fw-gap"
+                break
 
-        G = len(members)
-        if G == 0:
-            return [], [], np.zeros(0, dtype=np.int64), {
-                "relaxed_objective": None,
-                "num_groups": 0,
-                "flat_objective": False,
-                "convergence": None,
-            }
+        if selected_reason is None:
+            selected_reason = "max_iters"
 
-        obj_refine, K_refine, info_refine = mirror_descent(best_K)
-        info_refine["restart"] = "refinement"
+        if execution_mode == "default" and selected_reason == "max_iters":
+            selected_K = stage_best_objective_K.copy()
+            selected_label = "best-objective"
+        elif execution_mode in {"until-converged", "user-selected"}:
+            selected_K = stage_best_gap_K.copy()
+            selected_label = "best-relative-fw-gap"
 
-        if obj_refine < best_obj or best_info is None:
-            best_obj = float(obj_refine)
-            best_K = K_refine
-            best_info = info_refine
+        final_obj, final_grad = eval_obj_and_grad(selected_K)
+        final_gap = self._simplex_frank_wolfe_gap(selected_K, final_grad)
+        final_rel_gap = relative_gap(final_obj, final_gap, scale_reference)
+        final_converged = bool(final_rel_gap <= md_gap_tol_rel)
+
+        if final_converged:
+            final_reason = "frank_wolfe_gap"
+            selected_label = "best-relative-fw-gap"
         else:
-            if info_refine.get("converged", False) and not best_info.get("converged", False):
-                best_obj = float(obj_refine)
-                best_K = K_refine
-                best_info = info_refine
+            final_reason = selected_reason
+            if (
+                execution_mode == "user-selected"
+                and deadline is not None
+                and time.perf_counter() >= deadline
+            ):
+                final_reason = "time_limit"
 
-        final_obj, final_grad = eval_obj_and_grad(best_K)
-        final_gap = self._simplex_frank_wolfe_gap(best_K, final_grad)
-
-        initial_obj_for_scale = (
-            best_info.get("initial_objective", final_obj)
-            if best_info is not None
-            else final_obj
+        solver_elapsed = elapsed_time()
+        total_line_search_trial_attempts = int(
+            sum(
+                int(run.get("line_search_trial_attempts", 0))
+                for run in all_run_records
+            )
+        )
+        total_objective_trial_evaluations = int(
+            sum(
+                int(run.get("objective_trial_evaluations", 0))
+                for run in all_run_records
+            )
+        )
+        total_rejected_backtracking_trials = int(
+            sum(
+                int(run.get("rejected_backtracking_trials", 0))
+                for run in all_run_records
+            )
         )
 
-        final_scale = max(abs(float(final_obj)), abs(float(initial_obj_for_scale)), 1e-300)
-        final_rel_gap = final_gap / final_scale
+        convergence_info = {
+            "converged": final_converged,
+            "convergence_reason": final_reason,
+            "returned_solution_selection": selected_label,
+            "md_execution_mode": execution_mode,
+            "md_max_time": md_max_time,
+            "max_iters_per_run": (
+                md_default_max_iters_per_run
+                if execution_mode == "default"
+                else None
+            ),
+            "default_num_runs": (
+                md_default_num_runs
+                if execution_mode == "default"
+                else None
+            ),
+            "elapsed_time": float(solver_elapsed),
+            "iterations": int(total_iterations),
+            "total_iterations": int(total_iterations),
+            "objective": float(final_obj),
+            "frank_wolfe_gap": float(final_gap),
+            "relative_frank_wolfe_gap": float(final_rel_gap),
+            "md_gap_tol_rel": float(md_gap_tol_rel),
+            "best_objective_encountered": float(stage_best_objective),
+            "gap_at_best_objective": float(stage_gap_at_best_objective),
+            "relative_gap_at_best_objective": float(
+                stage_rel_gap_at_best_objective
+            ),
+            "best_gap_encountered": float(stage_best_gap),
+            "best_relative_gap_encountered": float(stage_best_rel_gap),
+            "objective_at_best_gap": float(stage_objective_at_best_gap),
+            "pre_pruning_enabled": bool(enable_pre_pruning),
+            "prune_tolerance": float(prune_tol),
+            "num_groups_initial": int(num_groups_initial),
+            "num_groups_after_pre_pruning": int(
+                num_groups_after_pre_pruning
+            ),
+            "num_groups_after_post_pruning": int(
+                num_groups_after_pre_pruning
+            ),
+            "post_pruning_applied": False,
+            "post_pruning_changed_pool": False,
+            "num_step_size_restarts": int(total_step_size_restarts),
+            "num_random_restarts": 0,
+            "denominator_regularization": float(
+                md_denominator_epsilon
+            ),
+            "incidence_matrix_nnz": int(incidence_matrix.nnz),
+            "step_size_strategy": "monotonic-backtracking",
+            "backtrack_factor": float(md_backtrack_factor),
+            "growth_factor": float(md_growth_factor),
+            "max_backtracking_trials": int(md_max_backtracking_trials),
+            "line_search_trial_attempts": int(
+                total_line_search_trial_attempts
+            ),
+            "objective_trial_evaluations": int(
+                total_objective_trial_evaluations
+            ),
+            "rejected_backtracking_trials": int(
+                total_rejected_backtracking_trials
+            ),
+            "verbose_progress_interval": float(md_verbose_interval),
+            "runs": all_run_records,
+        }
 
-        if best_info is None:
-            best_info = {}
-
-        best_info.update(
-            {
-                "converged": bool(final_rel_gap <= md_gap_tol_rel),
-                "convergence_reason": (
-                    "frank_wolfe_gap"
-                    if final_rel_gap <= md_gap_tol_rel
-                    else "max_iters"
-                ),
-                "objective": float(final_obj),
-                "frank_wolfe_gap": float(final_gap),
-                "relative_frank_wolfe_gap": float(final_rel_gap),
-                "md_gap_tol_rel": float(md_gap_tol_rel),
-            }
+        vprint(
+            "[allocation][done] "
+            f"converged={final_converged} reason={final_reason} "
+            f"selection={selected_label} "
+            f"elapsed={solver_elapsed:.2f}s "
+            f"total_iter={total_iterations} "
+            f"objective={final_obj:.8e} "
+            f"rel_FW_gap={final_rel_gap:.3e} "
+            f"target={md_gap_tol_rel:.3e} "
+            f"target_ratio={final_rel_gap / md_gap_tol_rel:.3g} "
+            f"stage_best_target_ratio="
+            f"{stage_best_rel_gap / md_gap_tol_rel:.3g} "
+            f"trial_evals={total_objective_trial_evaluations} "
+            f"rejected_trials={total_rejected_backtracking_trials}"
         )
 
-        raw = B * best_K
-
-        truncation_mode = bool(getattr(self, "attempt_truncation", False))
-
+        raw = B * selected_K
         reps = self._round_continuous_allocation(
             raw=raw,
             B=B,
@@ -1174,7 +1954,6 @@ class _AllocationMixin:
             objective_weights=rounding_objective_weights,
             objective_power=p,
             b=b,
-            truncation_mode=truncation_mode,
             objective_mode=objective_mode,
             truncation_cost=truncation_cost,
         )
@@ -1183,12 +1962,8 @@ class _AllocationMixin:
             "relaxed_objective": float(final_obj),
             "num_groups": G,
             "flat_objective": False,
-            "convergence": best_info,
+            "convergence": convergence_info,
         }
-
-    # ------------------------------------------------------------------
-    # Truncation scan
-    # ------------------------------------------------------------------
 
     def _solve_overlapping_power_with_truncation(
         self,
@@ -1204,7 +1979,11 @@ class _AllocationMixin:
         """
         Attempt truncation for the overlapping informed allocation.
 
-        Candidate active sets are generated by ranking observables by |w_j|.
+        Candidate active sets are generated by ranking pool-measurable
+        observables by |w_j|. Positive-weight observables absent from every
+        supplied setting are excluded from the relaxed objective; their
+        contribution is still included in the post-rounded proxy unless prior
+        counts already measure them.
 
         For each candidate active set S:
           - solve the relaxed allocation with inactive objective weights set to zero;
@@ -1227,10 +2006,23 @@ class _AllocationMixin:
             }
             return [], [], np.zeros(0, dtype=np.int64)
 
-        order = np.argsort(-abs_coeffs, kind="mergesort")
-        positive_order = order[abs_coeffs[order] > 0.0]
+        # Only observables that occur in at least one supplied setting can
+        # influence the relaxed allocation. Positive-weight observables absent
+        # from the pool are forced out of the relaxed objective and remain in
+        # the post-rounded truncation/statistical diagnostics as appropriate.
+        measurable_from_pool = np.zeros(M, dtype=bool)
+        for mem in members:
+            measurable_from_pool[np.asarray(mem, dtype=np.int32)] = True
 
-        if positive_order.size == 0:
+        positive = abs_coeffs > 0.0
+        structurally_unmeasurable_positive = positive & ~measurable_from_pool
+
+        order = np.argsort(-abs_coeffs, kind="mergesort")
+        optimizable_positive_order = order[
+            positive[order] & measurable_from_pool[order]
+        ]
+
+        if not np.any(positive):
             toks, mems, reps, alloc_info = self._solve_overlapping_power_with_priors(
                 tokens,
                 members,
@@ -1252,7 +2044,69 @@ class _AllocationMixin:
 
             return toks, mems, reps
 
-        candidate_sizes = self._truncation_candidate_sizes(int(positive_order.size))
+        if optimizable_positive_order.size == 0:
+            objective_weights_trial = np.zeros_like(objective_weights_full)
+
+            toks, mems, reps, alloc_info = self._solve_overlapping_power_with_priors(
+                tokens,
+                members,
+                objective_weights_trial,
+                objective_power,
+                b,
+                B,
+                objective_mode=objective_mode,
+                truncation_cost=abs_coeffs,
+                rounding_objective_weights=objective_weights_full,
+            )
+
+            new_counts = self._counts_from_allocation(mems, reps)
+            total_proxy, stat_proxy, trunc_bias, measured = (
+                self._energy_proxy_from_counts(
+                    abs_coeffs=abs_coeffs,
+                    objective_weights=objective_weights_full,
+                    objective_power=objective_power,
+                    objective_mode=objective_mode,
+                    b=b,
+                    new_counts=new_counts,
+                )
+            )
+
+            num_truncated_positive = int(
+                np.count_nonzero(positive & ~measured)
+            )
+
+            self.truncation_info = {
+                "attempted": True,
+                "selected": False,
+                "selected_objective_truncation": False,
+                "actual_truncation_after_rounding": bool(
+                    num_truncated_positive > 0
+                ),
+                "reason": (
+                    "no positive-weight observable is measurable from the pool"
+                ),
+                "num_structurally_unmeasurable_positive_observables": int(
+                    np.count_nonzero(structurally_unmeasurable_positive)
+                ),
+                "num_truncated_positive_observables": int(
+                    num_truncated_positive
+                ),
+                "selected_active_size": 0,
+                "no_truncation_active_size": 0,
+                "num_candidates": 0,
+                "num_measured_observables": int(np.count_nonzero(measured)),
+                "stat_proxy": float(stat_proxy),
+                "trunc_bias": float(trunc_bias),
+                "total_proxy": float(total_proxy),
+                "selected_allocation_info": alloc_info,
+                "records": [],
+            }
+
+            return toks, mems, reps
+
+        candidate_sizes = self._truncation_candidate_sizes(
+            int(optimizable_positive_order.size)
+        )
 
         best = None
         records = []
@@ -1261,7 +2115,7 @@ class _AllocationMixin:
             m = int(m)
 
             active = np.zeros(M, dtype=bool)
-            active[positive_order[:m]] = True
+            active[optimizable_positive_order[:m]] = True
 
             objective_weights_trial = np.zeros_like(objective_weights_full)
             objective_weights_trial[active] = objective_weights_full[active]
@@ -1294,7 +2148,6 @@ class _AllocationMixin:
                 )
             )
 
-            positive = abs_coeffs > 0.0
             num_truncated_positive = int(np.count_nonzero(positive & ~measured))
 
             convergence_info = alloc_info.get("convergence", None)
@@ -1336,7 +2189,7 @@ class _AllocationMixin:
             }
             return [], [], np.zeros(0, dtype=np.int64)
 
-        no_trunc_size = int(positive_order.size)
+        no_trunc_size = int(optimizable_positive_order.size)
         selected_objective_truncation = best["active_size"] < no_trunc_size
         actual_truncation_after_rounding = best["num_truncated_positive_observables"] > 0
 
@@ -1351,6 +2204,9 @@ class _AllocationMixin:
             "actual_truncation_after_rounding": bool(actual_truncation_after_rounding),
             "num_truncated_positive_observables": int(
                 best["num_truncated_positive_observables"]
+            ),
+            "num_structurally_unmeasurable_positive_observables": int(
+                np.count_nonzero(structurally_unmeasurable_positive)
             ),
 
             "selected_candidate_id": int(best["candidate_id"]),
@@ -1411,29 +2267,6 @@ class _AllocationMixin:
             "mode": None,
         }
 
-        if B <= 0 or len(self.cliques_pool) == 0:
-            return
-
-        members = self.cliques_pool
-        tokens = [encode_setting_token(g) for g in members]
-
-        G = len(members)
-        if G == 0:
-            return
-
-        informed_allocation = bool(getattr(self, "informed_allocation", True))
-
-        if not informed_allocation:
-            reps = self._uniform_reps(G, B)
-            self._commit_allocation(tokens, members, reps)
-
-            self.allocation_info = {
-                "attempted": True,
-                "mode": "uniform",
-                "num_groups": int(G),
-            }
-            return
-
         abs_coeffs, objective_weights, objective_power, objective_mode = (
             self._energy_objective_params()
         )
@@ -1451,6 +2284,59 @@ class _AllocationMixin:
         if np.any(b < 0.0):
             raise ValueError("prior_counts must be nonnegative.")
 
+        allocation_pool = getattr(
+            self,
+            "_allocation_cliques_pool_override",
+            self.cliques_pool,
+        )
+
+        if allocation_pool is None:
+            raise ValueError("The allocation cliques pool cannot be None.")
+
+        if B <= 0 or len(allocation_pool) == 0:
+            reason = "zero_budget" if B <= 0 else "empty_group_pool"
+            self._store_post_rounded_proxy_info(
+                abs_coeffs=abs_coeffs,
+                objective_weights=objective_weights,
+                objective_power=objective_power,
+                objective_mode=objective_mode,
+                b=b,
+                members=[],
+                reps=np.zeros(0, dtype=np.int64),
+                reason=reason,
+            )
+            return
+
+        members = allocation_pool
+        tokens = [encode_setting_token(g) for g in members]
+
+        G = len(members)
+        if G == 0:
+            return
+
+        informed_allocation = bool(getattr(self, "informed_allocation", True))
+
+        if not informed_allocation:
+            reps = self._uniform_reps(G, B)
+            self._commit_allocation(tokens, members, reps)
+
+            self.allocation_info = {
+                "attempted": True,
+                "mode": "uniform",
+                "num_groups": int(G),
+            }
+
+            self._store_post_rounded_proxy_info(
+                abs_coeffs=abs_coeffs,
+                objective_weights=objective_weights,
+                objective_power=objective_power,
+                objective_mode=objective_mode,
+                b=b,
+                members=members,
+                reps=reps,
+            )
+            return
+
         is_overlapping = bool(getattr(self, "is_overlapping", False))
 
         if not is_overlapping:
@@ -1462,7 +2348,16 @@ class _AllocationMixin:
                 B=B,
             )
 
-            reps = self._round_raw_allocation_largest_fraction(raw, B)
+            reps = self._round_continuous_allocation(
+                raw=raw,
+                B=B,
+                members=members,
+                objective_weights=objective_weights,
+                objective_power=objective_power,
+                b=b,
+                objective_mode=objective_mode,
+                truncation_cost=abs_coeffs,
+            )
 
             self._commit_allocation(tokens, members, reps)
 
@@ -1473,6 +2368,16 @@ class _AllocationMixin:
                 "objective_power": float(objective_power),
                 "num_groups": int(G),
             }
+
+            self._store_post_rounded_proxy_info(
+                abs_coeffs=abs_coeffs,
+                objective_weights=objective_weights,
+                objective_power=objective_power,
+                objective_mode=objective_mode,
+                b=b,
+                members=members,
+                reps=reps,
+            )
             return
 
         if bool(getattr(self, "attempt_truncation", False)):
@@ -1517,3 +2422,13 @@ class _AllocationMixin:
             }
 
         self._commit_allocation(tokens, members, reps)
+
+        self._store_post_rounded_proxy_info(
+            abs_coeffs=abs_coeffs,
+            objective_weights=objective_weights,
+            objective_power=objective_power,
+            objective_mode=objective_mode,
+            b=b,
+            members=members,
+            reps=reps,
+        )

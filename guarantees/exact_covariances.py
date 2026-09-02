@@ -127,3 +127,95 @@ def covariance_matrix(state, paulis, n_jobs=-1, verbose=0):
             C[j, i] = np.conj(val)  # Hermitian completion
 
     return C
+
+def Pauli_expectation_values(
+    state,
+    paulis,
+    n_jobs=-1,
+    verbose=0,
+    imag_tolerance=1e-12,
+):
+    """
+    Compute the exact expectation value of every Pauli observable:
+
+        exp_values[i] = <psi|O_i|psi>.
+
+    Since each O_i is a Hermitian Pauli string, its expectation value is real.
+    Small imaginary parts caused by floating-point roundoff are discarded after
+    checking that they lie below the specified tolerance.
+
+    Parameters
+    ----------
+    state : np.ndarray, shape (2^n,), dtype=complex128
+        Statevector |psi>.
+
+    paulis : np.ndarray, shape (M, n), dtype=int8/int
+        Each row is an n-qubit Pauli string with entries
+
+            {0, 1, 2, 3} = {I, X, Y, Z}.
+
+        The first column acts on the leftmost qubit, consistently with
+        `apply_pauli_string_numba`.
+
+    n_jobs : int, optional
+        Number of parallel joblib workers. Use -1 to use all available cores.
+
+    verbose : int, optional
+        Joblib verbosity level.
+
+    imag_tolerance : float, optional
+        Maximum tolerated absolute imaginary part of an expectation value.
+        Imaginary components below this threshold are treated as numerical
+        roundoff.
+
+    Returns
+    -------
+    exp_values : np.ndarray, shape (M,), dtype=float64
+        Exact expectation values of the Pauli strings with respect to `state`.
+    """
+    state = np.asarray(state, dtype=np.complex128)
+    paulis = np.asarray(paulis)
+
+    if state.ndim != 1:
+        raise ValueError("state must be a one-dimensional statevector")
+
+    if paulis.ndim != 2:
+        raise ValueError("paulis must be a two-dimensional array of shape (M, n)")
+
+    M, n = paulis.shape
+
+    if state.shape[0] != 2**n:
+        raise ValueError(
+            f"The statevector has length {state.shape[0]}, but {n} qubits "
+            f"require a statevector of length {2**n}."
+        )
+
+    if np.any((paulis < 0) | (paulis > 3)):
+        raise ValueError(
+            "All entries of paulis must belong to {0, 1, 2, 3} = {I, X, Y, Z}."
+        )
+
+    # A contiguous int8 representation is convenient for the Numba routine.
+    paulis = np.ascontiguousarray(paulis, dtype=np.int8)
+    state = np.ascontiguousarray(state, dtype=np.complex128)
+
+    exp_values_complex = np.asarray(
+        Parallel(n_jobs=n_jobs, verbose=verbose)(
+            delayed(expectation_numba)(state, paulis[i])
+            for i in range(M)
+        ),
+        dtype=np.complex128,
+    )
+
+    max_imaginary_part = (
+        np.max(np.abs(exp_values_complex.imag)) if M > 0 else 0.0
+    )
+
+    if max_imaginary_part > imag_tolerance:
+        raise ValueError(
+            "A Pauli expectation value has a non-negligible imaginary part: "
+            f"maximum |Im(<P>)| = {max_imaginary_part:.3e}. "
+            "This may indicate an invalid Pauli string or an implementation issue."
+        )
+
+    return np.ascontiguousarray(exp_values_complex.real, dtype=np.float64)
